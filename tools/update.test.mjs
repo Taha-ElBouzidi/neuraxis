@@ -18,6 +18,7 @@ import { runUpdate, updateNotice, settings, changesBetween, failureKinds, depend
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const KIT_TOOL = readFileSync(join(REPO, 'tools', 'kit.mjs'), 'utf8');
+const PUBLIC_TOOL = readFileSync(join(REPO, 'tools', 'public-install.mjs'), 'utf8');
 const temps = [];
 const temp = (p) => { const d = mkdtempSync(join(tmpdir(), p)); temps.push(d); return d; };
 process.on('exit', () => { for (const d of temps) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } } });
@@ -48,6 +49,7 @@ function engine(version, o = {}) {
     'tools/build-index.mjs': "import { mkdirSync, writeFileSync } from 'node:fs'; mkdirSync('index', { recursive: true }); writeFileSync('index/built.txt', 'built');\n",
     'tools/verify.mjs': '// verify ' + version + '\n' + verify + '\n',
     'tools/kit.mjs': KIT_TOOL,
+    'tools/public-install.mjs': PUBLIC_TOOL,
     'kit/memory/reference_how_to_a.md': kitMethod(o.kitBody || 'Version one.'),
     ...(o.extra || {}),
   };

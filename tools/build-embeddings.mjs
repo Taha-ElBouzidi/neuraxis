@@ -24,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import { pipeline, env } from '@xenova/transformers';
 import { embedText, textHash } from './embed-text.mjs';
+import { probeBackendSync } from './embed-guard.mjs';
+import { load as loadWasm } from './embed-wasm.mjs';
 
 env.allowLocalModels = false;
 
@@ -38,7 +40,12 @@ const slugs = Object.keys(keywords.descriptions).sort();
 const docs = slugs.map((s) => embedText(BRAIN, s, keywords.descriptions[s]));
 
 const t0 = Date.now();
-const embed = await pipeline('feature-extraction', MODEL);
+// The native runtime where it runs, else the same model on WebAssembly (a CPU without AVX, 2026-11-09): the backend
+// that works here is probed once in child processes and remembered (tools/embed-guard.mjs).
+const backend = process.env.HAVOK_EMBED_BACKEND || probeBackendSync(join(BRAIN, '.embed-probe.json'), MODEL);
+if (!backend) { console.error('the embedding model did not run here, natively or on WebAssembly: vectors not built. A model download that failed or timed out looks the same as a processor that cannot run it: run node tools/build-embeddings.mjs again; if it fails again, the processor likely lacks AVX and recall stays keyword only (nothing was saved, so the next run tries again)'); process.exit(3); }
+const embed = backend === 'wasm' ? await loadWasm(MODEL) : await pipeline('feature-extraction', MODEL);
+if (backend === 'wasm') console.log('embedding on WebAssembly (the native runtime cannot run on this CPU)');
 const loadMs = Date.now() - t0;
 
 // ONLY WHAT CHANGED IS EMBEDDED AGAIN (2026-09-28). Every save used to re-embed all 640 memories, one to

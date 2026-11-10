@@ -90,7 +90,9 @@ test('the turn recall answer carries the latest release next to the layer versio
 
 
 // ---- the routes, on a throwaway server ----
-const MODULES = ['brain-server.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
+const MODULES = ['brain-server.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
+// The decision log, which brain-server.mjs imports (in the engine since 0.4.90).
+MODULES.push('decision-store.mjs', 'decision-review.mjs');
 let root, port, child, token, published;
 const freePort = () => new Promise((ok) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ok(p)); }); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -112,7 +114,7 @@ before(async () => {
   published = publishRelease(join(root, 'RELEASES'), { zip: zipFile(root, 'served'), version: '0.1.12' });
   port = await freePort();
   child = spawn(process.execPath, [join(root, 'tools', 'brain-server.mjs'), '--allow-plaintext'], {
-    env: { ...process.env, HAVOK_HOME: join(root, 'home'), HAVOK_SERVER_PORT: String(port), HAVOK_LAYERS_DIR: join(root, 'LAYERS'), HAVOK_RELEASES_DIR: join(root, 'RELEASES') }, windowsHide: true, stdio: 'ignore',
+    env: { ...process.env, HAVOK_HOME: join(root, 'home'), HAVOK_SERVER_PORT: String(port), HAVOK_DECISIONS_PORT: '0', HAVOK_LAYERS_DIR: join(root, 'LAYERS'), HAVOK_RELEASES_DIR: join(root, 'RELEASES') }, windowsHide: true, stdio: 'ignore',
   });
   for (let i = 0; i < 100; i += 1) { try { if ((await get('/health')).status === 200) break; } catch { /* starting */ } await sleep(100); }
   token = readFileSync(join(root, 'home', 'havok-server-token'), 'utf8').trim();

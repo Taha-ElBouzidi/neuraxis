@@ -18,7 +18,8 @@ export { PLANS, DEFAULT_PLAN };
 const NL = String.fromCharCode(10);
 
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return null; } };
-export const isPublicInstall = (brain) => (readJson(join(brain, 'package.json')) || {}).name === 'infinite-context';
+import { isPublicInstall } from './public-install.mjs';
+export { isPublicInstall };
 
 // The plan in force for this brain, or null when none applies (see planOf).
 export function readPlan(brain) {

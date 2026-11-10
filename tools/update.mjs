@@ -14,7 +14,11 @@
 //   - Verify before and after. A failure the install did not already have rolls the update back; a failure that only
 //     appears with the new kit methods takes those back out and keeps the engine update.
 //   - It can be turned off: brain.json {"autoUpdate": false}, or "notify" to be told and install by hand, or the
-//     environment variable INFINITE_CONTEXT_AUTO_UPDATE=0. A run by hand works whatever the setting.
+//     environment variable NEURAXIS_AUTO_UPDATE=0 (the old name INFINITE_CONTEXT_AUTO_UPDATE is still read). A run by
+//     hand works whatever the setting.
+//   - The rename (0.4.90): the product was Infinite Context. An install cloned before the rename names infinite-context
+//     in package.json and its repository URL is the old one; GitHub redirects the old URL to the renamed repository, so
+//     its first update finds 0.4.90 there, and from then on package.json names neuraxis and the new URL.
 //
 //   node tools/update.mjs              install the newest release now, if there is one
 //   node tools/update.mjs --check      only say whether a newer release is out
@@ -27,6 +31,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { STATE_FILE as KIT_STATE, WAIT_DIR as KIT_WAIT, summary as kitSummary } from './kit.mjs';
+import { isPublicInstall, envOf } from './public-install.mjs';
 
 export const STATE = '.update-state.json';
 export const LOCK = '.update.lock';
@@ -51,7 +56,8 @@ const listOf = (s) => String(s || '').split(/\r?\n/).map((l) => l.trim()).filter
 const capital = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const firstLine = (e) => oneLine(String((e && (e.stderr || e.message)) || e).split(/\r?\n/).find((l) => l.trim()) || 'unknown error');
 
-export const isInfiniteContext = (brain) => readJson(join(brain, 'package.json'), {}).name === 'infinite-context';
+// An install of the public repository under its name or its old one (tools/public-install.mjs).
+export const isInfiniteContext = (brain) => isPublicInstall(brain);
 
 const parseVersion = (v) => { const m = String(v || '').match(/^v?(\d+)\.(\d+)\.(\d+)$/); return m ? m.slice(1).map(Number) : null; };
 export function compareVersions(a, b) {
@@ -64,10 +70,11 @@ export function compareVersions(a, b) {
 
 // The setting: the environment variable wins over brain.json, and the default is to install.
 export function settings(brain, env = process.env) {
-  const e = String(env.INFINITE_CONTEXT_AUTO_UPDATE || '').trim().toLowerCase();
-  if (['0', 'off', 'false', 'no'].includes(e)) return { mode: 'off', source: 'INFINITE_CONTEXT_AUTO_UPDATE' };
-  if (e === 'notify') return { mode: 'notify', source: 'INFINITE_CONTEXT_AUTO_UPDATE' };
-  if (['1', 'on', 'true', 'yes'].includes(e)) return { mode: 'install', source: 'INFINITE_CONTEXT_AUTO_UPDATE' };
+  const e = String(envOf(env, 'AUTO_UPDATE') || '').trim().toLowerCase();
+  const src = env.NEURAXIS_AUTO_UPDATE !== undefined ? 'NEURAXIS_AUTO_UPDATE' : 'INFINITE_CONTEXT_AUTO_UPDATE';
+  if (['0', 'off', 'false', 'no'].includes(e)) return { mode: 'off', source: src };
+  if (e === 'notify') return { mode: 'notify', source: src };
+  if (['1', 'on', 'true', 'yes'].includes(e)) return { mode: 'install', source: src };
   const v = readJson(join(brain, 'brain.json'), {}).autoUpdate;
   if (v === false || v === 'off') return { mode: 'off', source: 'brain.json' };
   if (v === 'notify') return { mode: 'notify', source: 'brain.json' };
@@ -115,7 +122,7 @@ export function dependenciesChanged(oldPkg, newPkg) {
 // ---- the parts that run commands --------------------------------------------------------------------
 // Children get the brain they belong to and the marker that they run inside an update (the recall hook that verify
 // runs end to end must not start another update), and git can never stop to ask for a password.
-const childEnv = (brain, env) => ({ ...env, INFINITE_CONTEXT_UPDATING: '1', HAVOK_BRAIN: brain, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' });
+const childEnv = (brain, env) => ({ ...env, NEURAXIS_UPDATING: '1', INFINITE_CONTEXT_UPDATING: '1', HAVOK_BRAIN: brain, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' });
 const gitIn = (brain, env) => (args, timeout = 60000) => execFileSync('git', ['-c', 'credential.helper=', '-c', 'core.quotePath=false', ...args], {
   cwd: brain, env, encoding: 'utf8', timeout, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
 }).trim();
@@ -208,7 +215,7 @@ export function runUpdate(opts = {}) {
   // Never a file written in a brain that is not an install of the public repository (the source brain the engine is exported from is not one).
   if (!isInfiniteContext(brain)) return { status: 'not-infinite-context' };
   if (mode === 'auto' && settings(brain, env).mode === 'off') return { status: 'off' };
-  const url = opts.url || env.INFINITE_CONTEXT_UPDATE_URL || upstreamUrl(brain);
+  const url = opts.url || envOf(env, 'UPDATE_URL') || upstreamUrl(brain);
   if (!takeLock(brain)) return { status: 'busy' };
   const log = logger(brain);
   try {
@@ -300,7 +307,7 @@ function update({ brain, env, mode, url, log }) {
   // of the install's own is rewritten.
   try {
     if (mergeMemories) {
-      const who = ok(['config', 'user.email']) ? [] : ['-c', 'user.name=Infinite Context update', '-c', 'user.email=update@infinite-context.invalid'];
+      const who = ok(['config', 'user.email']) ? [] : ['-c', 'user.name=Neuraxis update', '-c', 'user.email=update@neuraxis.invalid'];
       git([...who, 'merge', '--no-edit', '--quiet', T], STEP_MS);
     } else if (branch) git(['merge', '--ff-only', '--quiet', T], STEP_MS);
     else git(['checkout', '--quiet', '--detach', T], STEP_MS);
@@ -352,25 +359,28 @@ function update({ brain, env, mode, url, log }) {
 }
 
 // ---- what the recall hook calls -------------------------------------------------------------------------
+// The first update across the rename says so once, in the same line (an install from before 0.4.90 knew it as Infinite Context).
+const renamed = (last) => (compareVersions(last.from, '0.4.90') < 0 && compareVersions(last.to, '0.4.90') >= 0
+  ? ' The product is now called Neuraxis (it was Infinite Context); nothing changes in how it works or in your memories.' : '');
 export function noticeFor(last) {
   const tell = ' Tell the person this in one line.';
   const what = last.summary ? ' What changed: ' + last.summary + '.' : '';
   switch (last.status) {
     case 'updated':
-      return 'INFINITE CONTEXT UPDATE: it updated itself from ' + last.from + ' to ' + last.to + ' and its checks passed.' + what
+      return 'NEURAXIS UPDATE: it updated itself from ' + last.from + ' to ' + last.to + ' and its checks passed.' + what + renamed(last)
         + (last.kit ? ' ' + capital(last.kit) + '.' : '') + (last.kitNote ? ' ' + capital(last.kitNote) + '.' : '') + tell;
     case 'rolled-back':
-      return 'INFINITE CONTEXT UPDATE: it tried to update from ' + last.from + ' to ' + last.to + ', but its checks failed afterwards ('
+      return 'NEURAXIS UPDATE: it tried to update from ' + last.from + ' to ' + last.to + ', but its checks failed afterwards ('
         + last.reason + '), so it went back to ' + last.from + ' and nothing of the person was changed. To try again and see why: node tools/update.mjs.' + tell;
     case 'failed':
-      return 'INFINITE CONTEXT UPDATE: the update to ' + last.to + ' failed and could not go back on its own: ' + last.reason + '.' + tell;
+      return 'NEURAXIS UPDATE: the update to ' + last.to + ' failed and could not go back on its own: ' + last.reason + '.' + tell;
     case 'blocked':
-      return 'INFINITE CONTEXT UPDATE: version ' + last.to + ' is out (this install has ' + last.from + ') but was not installed automatically: ' + last.reason + '.' + tell;
+      return 'NEURAXIS UPDATE: version ' + last.to + ' is out (this install has ' + last.from + ') but was not installed automatically: ' + last.reason + '.' + tell;
     case 'available':
-      return 'INFINITE CONTEXT UPDATE: version ' + last.to + ' is out (this install has ' + last.from + ').' + what
+      return 'NEURAXIS UPDATE: version ' + last.to + ' is out (this install has ' + last.from + ').' + what
         + ' Updates are set to notify only; to install it: node tools/update.mjs.' + tell;
     case 'no-git':
-      return 'INFINITE CONTEXT UPDATE: automatic updates need a git clone of the repository and this install is not one, so it will not update itself; reinstall from a git clone to get updates.' + tell;
+      return 'NEURAXIS UPDATE: automatic updates need a git clone of the repository and this install is not one, so it will not update itself; reinstall from a git clone to get updates.' + tell;
     default:
       return '';
   }
@@ -386,7 +396,7 @@ function startBackground(brain, env) {
 // result worth telling, and starts a background check when the last one is a day old. Never throws.
 export function updateNotice(brain = SELF, { now = Date.now(), env = process.env, start = startBackground } = {}) {
   try {
-    if (env.INFINITE_CONTEXT_UPDATING) return '';
+    if (envOf(env, 'UPDATING')) return '';
     if (!isInfiniteContext(brain)) return '';
     const st = readJson(join(brain, STATE), {}) || {};
     let line = '';
@@ -410,7 +420,7 @@ function describe(r) {
     case 'blocked': return 'not updated to ' + r.to + ': ' + r.reason;
     case 'busy': return 'another update is running; try again in a few minutes';
     case 'off': return 'automatic updates are off';
-    case 'not-infinite-context': return 'this brain is not an install of the public repository (package.json does not name infinite-context), so it is not updated from there';
+    case 'not-infinite-context': return 'this brain is not an install of the public repository (package.json does not name neuraxis), so it is not updated from there';
     default: return r.status + (r.reason ? ': ' + r.reason : '');
   }
 }

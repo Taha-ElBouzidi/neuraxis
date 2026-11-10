@@ -1,10 +1,12 @@
-# Infinite Context
+# Neuraxis
+
+Read AGENTS.md first: it is the map of this repository and the install checklist.
 
 This directory is a memory system for the agent reading this. You never lose a fact, and you load
 almost nothing on any given turn. More context in the window makes you worse, not better: attention
 dilutes and cost rises. Load small, recall deep.
 
-If you are installing it, read `AGENTS.md` first. It is written for you and every step is verifiable.
+If you are installing it, `AGENTS.md` is written for you: read it all, then run the install as a conversation.
 
 ## How recall reaches you
 
@@ -55,7 +57,7 @@ Facts are written in one place only: here. Claude Code's own auto memory
 `~/.claude/settings.json`, because two stores that are both written drift apart silently and one
 becomes confidently wrong. Its `MEMORY.md` is kept as a short pointer to this directory and nothing
 else is written there. Never save a fact to both. If you see an auto memory section in your context,
-or new notes in that folder, auto memory is on again: tell the person and follow `AGENTS.md`, step 5.
+or new notes in that folder, auto memory is on again: tell the person and follow `AGENTS.md`, step 4.3.
 
 ## The gate
 

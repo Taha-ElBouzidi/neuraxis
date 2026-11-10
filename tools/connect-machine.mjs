@@ -104,7 +104,7 @@ if (readable === total && total > 0) {
   const p = c.ok ? run('git push', 60000) : { ok: false, out: c.out };
   say('request    : ' + (p.ok ? 'pushed as ' + reqFile : 'written to ' + reqFile + ' but NOT pushed. Push it by hand: ' + (c.out.split(NL)[0] || '')));
   say('');
-  say('Next, on the HOST machine (SERVER), an agent runs:');
+  say('Next, on the HOST machine (the one running the brain server), an agent runs:');
   say('  node tools/vault.mjs approve ' + me);
   say('  git commit -am "vault: grant ' + me + '" && git push');
   say('Then pull here. Until that happens this machine reads memories and rules normally and');

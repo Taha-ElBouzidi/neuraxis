@@ -84,7 +84,7 @@ const authed = (url, extra = []) => curl([
     : fail('plaintext gone', 'plain HTTP still answering: ' + r.slice(-50));
 }
 {
-  const r = curl(['header = "Authorization: Bearer wrongtokenwrongtokenwrongtoken"',
+  const r = curl(['header = "Authorization: Bearer ' + 'wrongtoken'.repeat(3) + '"',
     'url = "https://127.0.0.1:8443/vault/list"', 'cacert = "' + CERT + '"', 'silent', 'max-time = 10']);
   /CODE:401/.test(r) ? pass('bad token rejected', '401') : fail('bad token rejected', r.slice(-50));
 }

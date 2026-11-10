@@ -9,7 +9,7 @@ import { join } from 'node:path';
 const SUBFOLDERS = ['', 'machine', 'group'];
 
 // Every layer file this brain serves through /dist: none since the context release (2026-11-02). The layers moved to
-// the layer host (D:/dev/Havok/LAYERS, GET /layers/versions and GET /layers/<key>, tools/layer-host.mjs), which
+// the layer host (a LAYERS folder beside the brain, GET /layers/versions and GET /layers/<key>, tools/layer-host.mjs), which
 // versions each one, so a layer change no longer rides the code sync. The export stays so callers keep working; the
 // listing below is kept for allLayerFiles.
 export function servedLayerFiles() { return []; }

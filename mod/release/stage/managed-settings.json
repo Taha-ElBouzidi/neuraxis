@@ -1,0 +1,17 @@
+{
+  "extraKnownMarketplaces": {
+    "havok-org": {
+      "source": {
+        "source": "directory",
+        "path": "C:\\Program Files\\Havok\\claude-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "havok-mod@havok-org": true
+  },
+  "prependPlugins": [
+    "havok-mod@havok-org",
+    "sec-default@builtin"
+  ]
+}

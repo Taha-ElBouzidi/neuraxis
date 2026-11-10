@@ -1,18 +1,49 @@
 ---
 name: How to brief sub-agents and pick the right model
-description: Parallel agents, helpers, sub agents, delegate, split the work, which model to use: how to split work, how much to spend, the six part brief a sub-agent needs, and the small, balanced or strongest model choice.
+description: Parallel agents, helpers, sub agents, fork, branch, a copy of this conversation, delegate, split the work, which model to use: what a helper, a branch helper, a fork helper, a branch and a fork are and when to use which, how much to spend, the six part brief a sub-agent needs, and the small, balanced or strongest model choice.
 type: reference
 metadata:
   type: reference
   asserted: 2026-09-26
-  updated: 2026-11-03
-  kit_version: 2
-  kit_hash: 25232210ce511714
+  updated: 2026-11-10
+  kit_version: 3
+  kit_hash: 3dc3afe3d3b7fb2e
 ---
 
 # How to brief sub-agents and pick the right model
 
 A sub-agent is worth starting only when a task splits into parts that do not depend on each other: researching several options, checking several files, writing tests while another agent reads documentation. Those parts can run in parallel and in the background, so the main conversation is not blocked waiting on them, but only as far as the person's plan allows. A task whose steps each need the previous step's result should not be split; that work gets done directly, in order, by whoever is already holding the context.
+
+## Helpers, branches and forks: the words, and when to use which
+
+Five words, used the same way by you and the person. Explain them in two sentences each when you set up
+(AGENTS.md checklist item 8).
+
+| Word | What it starts from | Who sees and steers it | In Claude Code |
+|---|---|---|---|
+| **branch helper** | a copy of this conversation | hidden; it works for you and reports back | the Agent tool with the fork type |
+| **fork helper** (a sub-agent) | a clean context and your written brief | hidden; it works for you and reports back | the Agent tool with a normal sub-agent type |
+| **branch** | a copy of this conversation | the person, in a new terminal tab | `claude --resume <this session id> --fork-session` |
+| **fork** | a clean context and a written brief | the person, in a new terminal tab | `claude`, with the brief as its first message |
+| **agent** | its own standing name and context | the person, who comes back to it | see [[reference_how_to_create_an_agent]] |
+
+Which one:
+
+- **The work is yours and ends with this task:** a helper. Over material already read in this conversation (a long
+  file, a long discussion), use **branch helpers**: they read your conversation from the prompt cache instead of
+  reading the material again. Measured on Claude Code with three helpers over one file: about 58 percent cheaper than
+  three fresh helpers that each read it. Read the material once yourself first, then start them. On new, unrelated
+  material, a **fork helper** with a full brief is lighter, because it does not carry your whole conversation.
+  A helper that starts helpers of its own pays the full start again for each one: avoid it.
+- **The person wants to follow and steer it:** a branch or a fork, opened only when they ask, in a new tab of the
+  terminal they use, never a new window. A **branch** when they want to try another direction from the same point and
+  keep this conversation as it is; a **fork** when it is a separate task that does not need this conversation's past.
+- **The person will come back to the same area again and again:** a standing **agent**.
+- **One small task:** none of these. Do it yourself.
+
+Every helper costs usage; the plan below decides how many you may start. Name each one's model and the reason in one
+line when you start it (Choosing the model, below). Assistants other than Claude Code may not offer all five: say
+which ones the person's assistant has.
 
 ## How much the plan allows
 
@@ -52,4 +83,4 @@ Judgment never goes to the small tier, even when it would be cheaper. If the mod
 What a sub-agent returns is checked before it is relied on or reported onward. Its "done" is a claim, not a result, so the file gets opened, the test gets run, and the source gets read, the same as with any other claim of completion; see [[reference_how_to_review_work_before_calling_it_done]].
 
 ## Related
-[[reference_how_to_review_work_before_calling_it_done]] [[reference_how_to_research_with_sources]] [[feedback_sub_agents_get_a_ready_brief]] [[feedback_best_model_for_each_task]]
+[[reference_how_to_review_work_before_calling_it_done]] [[reference_how_to_research_with_sources]] [[reference_how_to_create_an_agent]] [[reference_how_to_message_another_agent]] [[feedback_sub_agents_get_a_ready_brief]] [[feedback_best_model_for_each_task]]

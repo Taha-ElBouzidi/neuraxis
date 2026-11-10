@@ -60,6 +60,7 @@ import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from 'node:
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, readdirSync, unlinkSync, openSync, closeSync, fsyncSync, renameSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { commitPathsInBackground } from './commit-paths.mjs';
 import { dirname, resolve, join } from 'node:path';
 import { homedir, hostname } from 'node:os';
 
@@ -149,7 +150,15 @@ function writeAtomic(file, text) {
   }
 }
 
-const saveVault = (v) => writeAtomic(VAULT, JSON.stringify(v, null, 2) + NL);
+// Each change is committed and pushed at once, in the background (2026-11-05: a vault set from the command line was
+// only committed by the nightly HavokBrainSync task, which is gone). The brain server's own store also commits;
+// whichever comes second finds nothing to commit. HAVOK_VAULT_NO_COMMIT=1 leaves it out (tests).
+const saveVault = (v) => {
+  writeAtomic(VAULT, JSON.stringify(v, null, 2) + NL);
+  if (process.env.HAVOK_VAULT_NO_COMMIT !== '1' && existsSync(join(BRAIN, '.git'))) {
+    try { commitPathsInBackground('vault: ' + (process.argv[2] || 'change') + ' ' + (process.argv[3] || ''), ['vault.json']); } catch { /* the next brain save commits it */ }
+  }
+};
 
 // ONE WRITER AT A TIME (audit 2026-11-01). Every command that changes vault.json read it, worked (one age call per
 // machine for a store), then wrote it back whole, so six stores in the same second kept ONE secret and told all six

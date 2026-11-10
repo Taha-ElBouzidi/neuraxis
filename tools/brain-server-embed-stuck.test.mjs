@@ -16,7 +16,9 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MODULES = ['brain-server.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
+const MODULES = ['brain-server.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
+// The decision log, which brain-server.mjs imports (in the engine since 0.4.90).
+MODULES.push('decision-store.mjs', 'decision-review.mjs');
 const EMBED_TIMEOUT_MS = 1500;
 let root, home, port, child, token;
 
@@ -63,7 +65,7 @@ before(async () => {
   ].join('\n'));
   port = await freePort();
   child = spawn(process.execPath, [join(root, 'tools', 'brain-server.mjs'), '--allow-plaintext'], {
-    env: { ...process.env, HAVOK_HOME: home, HAVOK_SERVER_PORT: String(port), HAVOK_EMBED_MODULE: join(root, 'fake-embed.mjs'), HAVOK_EMBED_TIMEOUT_MS: String(EMBED_TIMEOUT_MS) },
+    env: { ...process.env, HAVOK_HOME: home, HAVOK_SERVER_PORT: String(port), HAVOK_DECISIONS_PORT: '0', HAVOK_EMBED_PROBE: 'off', HAVOK_EMBED_MODULE: join(root, 'fake-embed.mjs'), HAVOK_EMBED_TIMEOUT_MS: String(EMBED_TIMEOUT_MS) },
     windowsHide: true, stdio: 'ignore',
   });
   for (let i = 0; i < 100; i += 1) {

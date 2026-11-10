@@ -1,0 +1,47 @@
+name: Tests
+
+# On every push and pull request: the engine's own tests and its checks on Windows, Linux and macOS, and a scan of the
+# change for secrets. Windows is the tested system and must pass. Linux and macOS are not tested yet: their jobs run the
+# same steps so each push shows the truth there, but a failure on them does not fail the run (continue-on-error) until
+# the tests that are Windows by nature carry a skip with their reason. The scan of the authors' own data runs before
+# each release on their side, not here, because its word list is the data it guards.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os != 'windows-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Initialise (rules, index, meaning model)
+        run: node tools/init.mjs --plan small
+      - name: Tests
+        run: node --test --test-concurrency=1 tools/
+      - name: Verify
+        run: node tools/verify.mjs
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

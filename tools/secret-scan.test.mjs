@@ -54,3 +54,31 @@ test('a commit made in another repository by cd or git -C is scanned there, not 
     assert.equal(hook(target, 'cd "' + session.replace(/\\/g, '/') + '" && git commit -m "x"'), null);
   } finally { for (const r of [session, target]) rmSync(r, { recursive: true, force: true }); }
 });
+
+// M4 (system review 2026-11-09): this system's own secret shapes, and commits that skip the git hooks.
+test('an Anthropic key, an age identity, a Tailscale key and a random 32-byte token are refused', () => {
+  const shapes = {
+    anthropic: 'sk-' + 'ant-api03-' + 'Ab1'.repeat(10),
+    age: 'AGE-SECRET-' + 'KEY-1' + 'QWERTY0123456789'.repeat(4),
+    tailscale: 'tskey-' + 'auth-' + 'kT9xQ2mPz7Lw',
+    token: 'Zx9' + 'qLm2Pw7Rt4Vb8Nc1Hy6Jd3Kf5Gs0Ue-Ai_Oo' + 'XyWv',
+  };
+  for (const [name, value] of Object.entries(shapes)) {
+    const root = repo({ 'a.txt': 'value = ' + value + '\n' });
+    try { assert.equal(hook(root, 'git commit -m "x"')?.permissionDecision, 'deny', name); } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test('a lock file integrity hash is not taken for a token', () => {
+  const root = repo({ 'package-lock.json': '{"integrity": "sha512-AZkcAA5vnN/v4PDqKyMR5lx7hZttPDgClv83E//FMNhR2TMcLUhfRUBHCmSl0oi9zMgDDqRUJkSxO3wm85+XLg=="}\n' });
+  try { assert.equal(hook(root, 'git commit -m "x"'), null); } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a commit with --no-verify or -n is refused; the same letters inside the message are not', () => {
+  const root = repo({ 'a.txt': 'nothing here\n' });
+  try {
+    assert.equal(hook(root, 'git commit --no-verify -m "x"')?.permissionDecision, 'deny');
+    assert.equal(hook(root, 'git commit -nm "x"')?.permissionDecision, 'deny');
+    assert.equal(hook(root, 'git commit -m "skip -n and --no-verify"'), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

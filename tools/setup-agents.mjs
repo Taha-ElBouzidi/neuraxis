@@ -32,7 +32,7 @@ const CHECK = process.argv.includes('--check');
 const stamp = new Date().toISOString().slice(0, 10);
 const say = (s) => process.stdout.write(s + NL);
 const NODE = process.execPath.split(String.fromCharCode(92)).join('/');
-const SERVER = BRAIN + '/tools/recall-mcp.mjs';
+const RECALL_MCP = BRAIN + '/tools/recall-mcp.mjs';
 const START = '<!-- >>> brain memory (setup-agents.mjs) -->';
 const END = '<!-- <<< brain memory -->';
 
@@ -71,7 +71,7 @@ function upsertBlock(p) {
   t = i >= 0 && j > i ? t.slice(0, i) + block + t.slice(j + END.length) : (t.trim() ? t.replace(/\s*$/, '') + NL + NL : '') + block + NL;
   mkdirSync(dirname(p), { recursive: true }); backup(p); writeFileSync(p, t);
 }
-const stdio = { command: NODE, args: [SERVER] };
+const stdio = { command: NODE, args: [RECALL_MCP] };
 // Hook commands for the other assistants: plain "node" and the adapter path. Antigravity silently ran
 // nothing when the command started with a quoted absolute node path (captured 2026-09-26).
 const ADAPTER = BRAIN + '/tools/hook-adapter.mjs';
@@ -177,7 +177,7 @@ const AGENTS = [
     run: () => {
       const p = join(HOME, '.continue', 'mcpServers', 'brain.yaml');
       mkdirSync(dirname(p), { recursive: true }); backup(p);
-      writeFileSync(p, ['name: brain', 'version: 0.0.1', 'schema: v1', 'mcpServers:', '  - name: brain', '    type: stdio', '    command: ' + JSON.stringify(NODE), '    args:', '      - ' + JSON.stringify(SERVER), ''].join(NL));
+      writeFileSync(p, ['name: brain', 'version: 0.0.1', 'schema: v1', 'mcpServers:', '  - name: brain', '    type: stdio', '    command: ' + JSON.stringify(NODE), '    args:', '      - ' + JSON.stringify(RECALL_MCP), ''].join(NL));
       return 'MCP (Agent mode only; no global instruction file)';
     },
   },

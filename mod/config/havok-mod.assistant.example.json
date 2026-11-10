@@ -1,0 +1,10 @@
+{
+  "agent": "assistant",
+  "main": true,
+  "context": { "layerHost": "http://127.0.0.1:8478", "idle": { "enabled": true } },
+  "checks": { "brainDir": "" },
+  "mail": { "enabled": false },
+  "usage": { "enabled": false },
+  "keepWarm": { "enabled": true },
+  "remoteControl": { "enabled": false }
+}

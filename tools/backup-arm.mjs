@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// THE BACKUP HOOKS, ARMED ONLY WHEN THE MOD IS NOT HEALTHY (HAVOK, 2026-11-03; plan HAVOK-MOD/plans/hooks-off-while-mod-
+// THE BACKUP HOOKS, ARMED ONLY WHEN THE MOD IS NOT HEALTHY (HAVOK, 2026-11-03; the mod's plan hooks-off-while-mod-
 // healthy.md). The brain plugin's hooks.json keeps only SessionStart: every other entry started a node process on every
 // prompt, tool call and stop although the mod had done the work (1.6 s each on the locked-down client machine). Those backups now live in a
 // marked block of ~/.claude/settings.json (settings hooks reload live) that exists only while some session is armed.

@@ -39,21 +39,26 @@ import { homedir, networkInterfaces, hostname } from 'node:os';
 import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { execFileSync, execFile, spawn } from 'node:child_process';
 import { withBrainLock } from './brain-git-lock.mjs';
-import { vaultAccess, mayReplace, ownEntries } from './vault-access.mjs';
+import { vaultAccess, mayReplace, ownEntries, memoryAccess } from './vault-access.mjs';
 // The SAME tokenizer the hook uses, imported rather than reimplemented. Two copies of a tokenizer
 // is two sparse rankings that agree until the day someone edits one of them.
 import { makeRecall, SHORT_FOLLOW_UP } from './recall-core.mjs';
 import { watchTailnet } from './tailnet-watch.mjs';
 import { servedLayerFiles } from './layers-dist.mjs';
+import { makeAlerts } from './server-alerts.mjs';
 import { layerVersions, readLayer } from './layer-host.mjs';
 import { releaseSummary, releaseManifest, releaseZip, releasePath, VERSION_RE } from './release-host.mjs';
 import { makeRecallTurn, translateSync } from './recall-turn.mjs';
+// The decision log and its review page (The owner, 2026-11-04; in the engine since 0.4.90, tools/decision-review.mjs).
+import { waitingCount as decisionsWaiting, search as searchDecisions, MAX_BODY_CHARS as DECISIONS_MAX_BODY } from './decision-store.mjs';
+import { handleDecisionRoute, acceptRows as acceptDecisionRows, startReviewListener, reviewPort, sendSystemMessage, reviewKeyFile, messagesUrlOf } from './decision-review.mjs';
+import { acceptQuota, readQuota } from './agy-quota-store.mjs';
 import { record as recordProvenance } from './provenance.mjs';
 import { makeGuardedEmbedder } from './embed-guard.mjs';
 
 const BRAIN = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.HAVOK_SERVER_PORT || 8478);
-// The layer host folder sits beside the brain on the host (D:/dev/Havok/LAYERS), its own git repo, never inside this one.
+// The layer host folder sits beside the brain on the host (a LAYERS folder beside it), its own git repo, never inside this one.
 const LAYERS_DIR = process.env.HAVOK_LAYERS_DIR || resolve(BRAIN, '..', 'LAYERS');
 // The release host folder (task 18): the releases HAVOK published with tools/release-publish.mjs, also outside the repo.
 const RELEASES_DIR = process.env.HAVOK_RELEASES_DIR || resolve(BRAIN, '..', 'RELEASES');
@@ -86,7 +91,10 @@ const ACCESS_LOG = join(BRAIN, '.server-access.log');
 const TLS_KEY = resolve(CONFIG_DIR, 'havok-server-key.pem');
 const TLS_CERT = resolve(CONFIG_DIR, 'havok-server-cert.pem');
 const HAVE_TLS = existsSync(TLS_KEY) && existsSync(TLS_CERT);
-const ALLOW_PLAINTEXT = process.argv.includes('--allow-plaintext') || !HAVE_TLS;
+// A server started without --public listens on 127.0.0.1 only, where plain HTTP never leaves the machine: it serves it
+// whether or not a certificate exists (2026-11-09, a machine without AVX: a certificate present dropped the plain loopback port the
+// standalone mod is set to, http://127.0.0.1:8479, and the server had to be started with --allow-plaintext).
+const ALLOW_PLAINTEXT = process.argv.includes('--allow-plaintext') || !HAVE_TLS || !PUBLIC;
 
 // Token, generated once and reused. Printed only on creation, never on startup, so it cannot
 // be scraped from a log or a screen share later.
@@ -150,7 +158,7 @@ function authOf(header) {
   let found = null;
   if (constEq(given, TOKEN)) found = { name: 'SERVER', scope: 'full' };
   for (const [tok, meta] of Object.entries(EXTRA_TOKENS_NOW())) {
-    if (constEq(given, tok)) found = { name: meta.name || 'unnamed', scope: meta.scope || 'recall', store: meta.store === true };
+    if (constEq(given, tok)) found = { name: meta.name || 'unnamed', scope: meta.scope || 'recall', store: meta.store === true, ...(meta.memoryWrites ? { memoryWrites: String(meta.memoryWrites) } : {}) };
   }
   return found;
 }
@@ -185,8 +193,10 @@ let saveRunning = false;
 // that no longer matched memory/ and refused, and 115 writes in a row were saved but never committed. Holding new
 // writes for the few seconds of index and commit keeps memory/ still while it is checked. The push is outside it.
 let saveGate = Promise.resolve();
+// HAVOK_BRAIN_SERVER_COMMIT: the brain's pre-commit lets a commit of memory/ through only from here (or the
+// save-brain fallback) where brain.json memoryWritesThroughServer is set (M2, system review 2026-11-09).
 const runAsync = (cmd, args, timeout) => new Promise((resolve, reject) => {
-  execFile(cmd, args, { cwd: BRAIN, timeout, windowsHide: true, maxBuffer: 16 << 20 }, (e, stdout, stderr) => (
+  execFile(cmd, args, { cwd: BRAIN, timeout, windowsHide: true, maxBuffer: 16 << 20, env: { ...process.env, HAVOK_BRAIN_SERVER_COMMIT: '1' } }, (e, stdout, stderr) => (
     e ? reject(Object.assign(e, { stdout, stderr })) : resolve(stdout)));
 });
 function queueBrainSave(slug, existed, callerName, ip) {
@@ -221,16 +231,40 @@ async function saveOneBatch() {
   if (!keep.length) { openGate(); return; }
   let pushError = null;
   try {
-    await runAsync('git', ['-C', BRAIN, 'add', 'memory/', 'index/', 'MANIFEST.md', 'provenance/'], 30000);
+    // Only this batch's memories (M2): a file another process left in memory/ is never swept into this commit.
+    const mine = keep.map(([s]) => 'memory/' + s + '.md');
+    const paths = [...mine, 'memory/MEMORY.md', 'index/', 'MANIFEST.md', 'provenance/'].filter((p) => p.endsWith('/') ? existsSync(join(BRAIN, p)) : true);
+    await runAsync('git', ['-C', BRAIN, 'add', '-A', '--', ...paths], 30000);
+    // The updated: date before the commit, not in it: git drops what the pre-commit stamps when a commit is limited to
+    // paths, so the date stayed on disk only and each saved memory then read as modified (2026-11-10).
+    await runAsync(process.execPath, [join(BRAIN, 'tools', 'stamp-updated.mjs')], 60000).catch(() => undefined);
+    await runAsync('git', ['-C', BRAIN, 'add', '-A', '--', ...mine.filter((p) => existsSync(join(BRAIN, p)))], 30000).catch(() => undefined);
     const who = [...new Set(keep.map(([, m]) => m.callerName))].join(', ');
     const message = keep.length === 1
       ? (keep[0][1].existed ? 'memory: update ' : 'memory: ') + keep[0][0] + ' (via ' + who + ')'
       : 'memory: ' + keep.map(([s]) => s).join(', ') + ' (via ' + who + ')';
     // Only the brain's own paths: this folder is shared with sessions editing code, and a plain commit took their
     // staged code twice on 2026-10-23 under a memory message.
-    try { await runAsync('git', ['-C', BRAIN, 'commit', '-m', message, '--', 'memory/', 'index/', 'MANIFEST.md', 'provenance/'], 180000); }
-    finally { openGate(); }
-    await runAsync('git', ['-C', BRAIN, 'push', '-q', 'origin', 'HEAD'], 120000);
+    try {
+      await runAsync('git', ['-C', BRAIN, 'commit', '-m', message, '--', ...paths], 180000);
+      // A commit limited to paths uses its own index; the pre-commit's date stamp then left the real index holding the
+      // unstamped copy, which a later plain commit would have written back. The real index takes HEAD for these paths.
+      await runAsync('git', ['-C', BRAIN, 'reset', '-q', '--', ...paths], 30000).catch(() => undefined);
+    } finally { openGate(); }
+    // A memory file in memory/ that no batch wrote (written by hand) is indexed from the disk but never committed here:
+    // said in the audit log, so it is found.
+    try {
+      const stray = String(await runAsync('git', ['-C', BRAIN, 'status', '--porcelain', '--', 'memory/'], 30000)).split('\n').filter((l) => /\.md$/.test(l) && !/MEMORY\.md$/.test(l)).map((l) => l.slice(3).trim());
+      if (stray.length) audit('MEMORY-STRAY files in memory/ not written through the server: ' + stray.slice(0, 10).join(', '));
+    } catch { /* the audit line is a courtesy */ }
+    try { await runAsync('git', ['-C', BRAIN, 'push', '-q', 'origin', 'HEAD'], 120000); }
+    catch (pe) {
+      // Refused because another machine pushed first: take its commits from Gitea, push once more (2026-11-05: only
+      // the nightly HavokBrainSync task pulled before, so the memory reached the remote up to a day late).
+      if (!/non-fast-forward|fetch first|rejected/i.test(String((pe && (pe.stderr || pe.message)) || ''))) throw pe;
+      await runAsync('git', ['-C', BRAIN, 'pull', '-q', '--no-rebase', '--no-edit', 'gitea', 'master'], 180000);
+      await runAsync('git', ['-C', BRAIN, 'push', '-q', 'origin', 'HEAD'], 120000);
+    }
   } catch (ge) {
     const msg = String((ge && (ge.stderr || ge.stdout || ge.message)) || '');
     pushError = /VERIFY FAILED/i.test(msg) ? 'the pre-commit gate refused it: run node tools/verify.mjs'
@@ -239,6 +273,12 @@ async function saveOneBatch() {
   }
   openGate(); // also when git add or the commit threw: a gate left shut would hang every later write
   for (const [s, m] of keep) audit('MEMORY-WRITE ' + m.ip + ' ' + m.callerName + ' ' + s + (m.existed ? ' update' : ' new') + (pushError ? ' PUSH-FAILED: ' + pushError : ''));
+  // A contact memory changed: the WhatsApp address book (index/contacts.json) is rebuilt from it, detached, after this
+  // batch's own commit (2026-11-05: the hourly HavokWaContacts task is gone). Never from the commit gate: chained there,
+  // each rebuild's commit ran the gate again (seven commits in three minutes, 2026-11-05 17:53).
+  if (keep.some(([s]) => s.startsWith('contact_')) && existsSync(join(BRAIN, 'tools', 'contacts.mjs'))) {
+    try { spawn(process.execPath, [join(BRAIN, 'tools', 'contacts.mjs')], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch { /* the bridge's new-number run catches up */ }
+  }
 }
 
 function audit(line) {
@@ -318,7 +358,14 @@ async function getEmbedder() {
     embedder = makeGuardedEmbedder({
       model: 'Xenova/all-MiniLM-L6-v2', module: process.env.HAVOK_EMBED_MODULE || null,
       timeoutMs: EMBED_TIMEOUT_MS, loadTimeoutMs: EMBED_LOAD_TIMEOUT_MS,
-      onEvent: (what) => audit('EMBED-' + what.toUpperCase() + ' limit ' + (what === 'load-timeout' ? EMBED_LOAD_TIMEOUT_MS : EMBED_TIMEOUT_MS) + 'ms'),
+      // The model is tried once in a child process before it runs beside the server (a CPU without AVX crashes it).
+      probe: process.env.HAVOK_EMBED_PROBE !== 'off', stateFile: join(BRAIN, '.embed-probe.json'),
+      onEvent: (what) => {
+        if (/^probe-/.test(what)) { audit('EMBED-' + what.toUpperCase()); return; }
+        const limit = what === 'load-timeout' ? EMBED_LOAD_TIMEOUT_MS : EMBED_TIMEOUT_MS;
+        audit('EMBED-' + what.toUpperCase() + ' limit ' + limit + 'ms');
+        try { if (/timeout/.test(what)) serverAlerts.embed(what, limit); } catch { /* never fails the embed path */ }
+      },
     });
   }
   return embedder.embed;
@@ -352,13 +399,23 @@ const handler = async (req, res) => {
   const ip = req.socket.remoteAddress || '?';
   // Decoded as a stream: chunk by chunk, a letter split across two packets became two broken characters (audit
   // 2026-11-01, tools/brain-server-requests.test.mjs).
-  req.setEncoding('utf8');
+  // Not for the archive upload, whose body is gzip bytes (tools/archive-upload.mjs).
+  if (!String(req.url || '').startsWith('/archive/upload')) req.setEncoding('utf8');
   const url = new URL(req.url, 'http://x');
   const path = url.pathname;
 
   // Liveness is deliberately unauthenticated and deliberately empty: a tunnel health check
   // needs it, and it must reveal nothing about what is behind the door.
   if (path === '/health') return json(res, 200, { ok: true });
+
+  // TAILNET SWEEP (2026-11-05, item 3): the task HavokTailnetUp calls this on Windows' "network connected" event, in
+  // place of reading the interface list every 15 s. Loopback only and no token: it reveals nothing and only makes the
+  // server bind a tailnet address it does not serve yet.
+  if (path === '/tailnet/sweep' && req.method === 'POST') {
+    if (!/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(ip)) return json(res, 403, { error: 'loopback only' });
+    const bound = tailnetSweep ? tailnetSweep.sweep() : [];
+    return json(res, 200, { ok: true, bound, known: tailnetSweep ? tailnetSweep.known() : [], addresses: tailnetAddresses() });
+  }
 
   // ONE-SHOT TOKEN BOOTSTRAP, bound to a tailnet address.
   //
@@ -619,33 +676,7 @@ const handler = async (req, res) => {
       // already existed and brought three bugs with it: a sweep race, permanent git dirt, and a
       // pull that wedges on untracked files. Code is different: hooks and tools must be on disk
       // to execute, which is the whole reason this route exists.
-      const allowed = () => {
-        // The plugin manifests and .mcp.json travel too, since 2026-09-07: a mirror-only machine
-        // installs the plugin from its local checkout, and claude plugin update compares versions,
-        // so without these a version bump never reaches the one laptop that cannot use GitHub.
-        const list = ['server-cert.pem', 'server-endpoint.json', 'CLAUDE.md', 'REFLEX.md',
-          'METHODOLOGIES.md', 'GOVERNANCE.md', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', '.mcp.json',
-          // The standing rules every agy sub-agent loads through ~/.gemini/GEMINI.md, on every
-          // machine (2026-09-25). A .md in tools/ fails the extension filter below; a laptop client found it
-          // never arrived. Named one by one so no other markdown in tools/ is published by accident.
-          'tools/subagent-rules.md', 'tools/agent-rules.md',
-          // Read by hooks/check-session-start.mjs (plugin 0.4.55). a mirror-only machine got the new script but not this
-          // file, so its sessions started with Claude's memory off and no memory instructions at all.
-          'hooks/memory-instructions.md',
-          // The Outlook-safe email blocks every agent copies from (2026-10-23).
-          'tools/email-blocks.html'];
-        for (const d of ['tools', 'hooks']) {
-          let names = [];
-          try { names = readdirSync(join(BRAIN, d)); } catch { continue; }
-          for (const n of names) {
-            if (/\.(mjs|json|ps1|cmd)$/.test(n)) list.push(d + '/' + n);
-          }
-        }
-        // The mod's shared context layers: global, machine and group layers, which every
-        // agent on every machine reads from layers/ of its brain copy. Markdown, so named by layers-dist.mjs.
-        list.push(...servedLayerFiles(BRAIN));
-        return list;
-      };
+      const allowed = distFiles;
 
       // Serve the CANONICAL LF form, not what is on this disk.
       //
@@ -674,16 +705,7 @@ const handler = async (req, res) => {
       // the server read and hash 1.7MB of memory and embeddings each time, so this stats only:
       // name, size, mtime. Cheap enough to call constantly, exact enough to never miss a write.
       if (path === '/dist/version') {
-        const h = createHash('sha256');
-        let n = 0;
-        for (const rel of allowed().sort()) {
-          try {
-            const st = statSync(join(BRAIN, rel));
-            h.update(rel + ':' + st.size + ':' + Math.floor(st.mtimeMs) + '|');
-            n += 1;
-          } catch { /* absent on this machine, skip */ }
-        }
-        return json(res, 200, { version: h.digest('hex').slice(0, 16), files: n });
+        return json(res, 200, distVersion(0));
       }
 
       if (path === '/dist') {
@@ -909,6 +931,11 @@ const handler = async (req, res) => {
 
       const file = join(BRAIN, 'memory', slug + '.md');
       const existed = existsSync(file);
+      const mAccess = memoryAccess(caller, { method: 'POST', slug, exists: existed, force: false });
+      if (mAccess !== 'allow') {
+        audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + mAccess);
+        return json(res, 403, { error: 'not allowed', detail: mAccess });
+      }
       try {
         await saveGate;
         writeFileSync(file, fm, 'utf8');
@@ -959,6 +986,11 @@ const handler = async (req, res) => {
       for await (const chunk of req) { raw += chunk; if (raw.length > 20_000) { req.destroy(); return; } }
       let body = {};
       try { body = JSON.parse(raw || '{}'); } catch { /* a reason is optional in shape, not in policy */ }
+      const dAccess = memoryAccess(caller, { method: 'DELETE', slug, exists: true, force: !!body.force });
+      if (dAccess !== 'allow') {
+        audit('MEMORY-DELETE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + dAccess);
+        return json(res, 403, { error: 'not allowed', detail: dAccess });
+      }
       const why = String(body.why || '').trim();
       if (why.length < 10) {
         return json(res, 400, { error: 'no reason', detail: 'say why in at least ten characters. A deletion with no reason is indistinguishable from an accident.' });
@@ -1088,6 +1120,7 @@ const handler = async (req, res) => {
       tp.machine = String(tp.machine || '').slice(0, 64);
       const tt = Date.now();
       const out = await recallTurn(tp);
+      try { serverAlerts.recall(Date.now() - tt); } catch { /* an alert never fails the recall answer */ }
       if (out.memories.length) {
         try {
           const PULSE = join(BRAIN, '.recall-pulse.jsonl');
@@ -1096,6 +1129,19 @@ const handler = async (req, res) => {
           if (lines.length > 800) writeFileSync(PULSE, lines.slice(-600).join('\n') + '\n', 'utf8');
         } catch { /* bookkeeping only */ }
       }
+      // The published code version, so a mirroring machine pulls on change (hardening item 3).
+      try { out.distVersion = distVersion().version; } catch { /* the recall answer never fails for it */ }
+      // When the shared Gemini quota reading was taken, so a machine with an older copy fetches it (agy-quota-store.mjs).
+      try { const q = readQuota(BRAIN); if (q && q.at) out.agyQuotaAt = q.at; } catch { /* the recall answer never fails for it */ }
+      // The count of decisions waiting for the owner's review, for the mod's status line.
+      try { out.decisionsWaiting = decisionsWaiting(BRAIN); } catch { /* the recall answer never fails for it */ }
+      // the owner's decisions that match this prompt, next to the memories (The owner, 2026-11-04), so an agent checks the log
+      // before asking him. At most 3, only clear matches (decision-store search, recall mode). A reversed one carries
+      // the owner's note, so the deciding agent sees the reversal here even where no agent messages are configured.
+      try {
+        const ds = searchDecisions(BRAIN, tp.prompt, { limit: 3, recall: true });
+        if (ds.length) out.decisions = ds.map((d) => ({ id: d.id, at: d.at, by: d.by || d.agent, agent: d.agent, area: d.area, what: d.what, state: d.state, ...(d.state === 'reversed' && d.review && d.review.note ? { note: String(d.review.note).slice(0, 300) } : {}) }));
+      } catch { /* the recall answer never fails for it */ }
       audit('RECALL-TURN ' + ip + ' ' + caller.name + ' chars=' + tp.prompt.length + ' hits=' + out.memories.length + ' earlier=' + out.memories.filter((m) => m.why === 'earlier').length + ' dropped=' + out.droppedEarlier.length + ' ' + (Date.now() - tt) + 'ms');
       return json(res, 200, out);
     }
@@ -1141,6 +1187,15 @@ const handler = async (req, res) => {
     // records slugs and nothing else: no prompt, no answer, no content. A slug is the filename of
     // a memory that is already sitting on this same disk, so writing it next to them adds no
     // exposure. The prompt is what must never be written down, and it still is not.
+    // THE DECISION LOG (tools/decision-review.mjs, whose header has the whole access model). Here, behind the bearer
+    // token checked above, so no caller without a brain token reaches any of these. On a stock install:
+    //   POST /decisions, GET /decisions (?q= search), GET /decisions/count: any token, the owner's and every agent's.
+    //   POST /decisions/<id>/review: only agent@<token machine> listed in brain.json decisionReviewerAgents (empty by
+    //   default, so nobody), and never on that agent's own decision. The owner reviews on the separate 127.0.0.1 page.
+    if (path === '/decisions' || path === '/decisions/count' || /^\/decisions\/[A-Za-z0-9_-]{1,64}\/review$/.test(path)) {
+      if (await handleDecisionRoute(req, res, { brain: BRAIN, path, url, caller, audit, getToken: () => TOKEN })) return;
+    }
+
 
     if (path === '/pulse' && req.method === 'POST') {
       let pbody = '';
@@ -1290,22 +1345,96 @@ server.on('error', (e) => {
 // the trimmer's patience, not a measured optimum: short enough to beat the several-minute gaps
 // that already cost 358ms, long enough that the cost is nil. It burns roughly 30ms of one core
 // per interval, about 0.07 percent.
+// THE PUBLISHED CODE FILES (the /dist routes): what a mirroring machine (a laptop client, the laptop) copies with
+// tools/pull-from-server.mjs. Hoisted out of the route so the recall answer can carry the same version.
+function distFiles() {
+    // The plugin manifests and .mcp.json travel too, since 2026-09-07: a mirror-only machine
+    // installs the plugin from its local checkout, and claude plugin update compares versions,
+    // so without these a version bump never reaches the one laptop that cannot use GitHub.
+    const list = ['server-cert.pem', 'server-endpoint.json', 'CLAUDE.md', 'REFLEX.md',
+      'METHODOLOGIES.md', 'GOVERNANCE.md', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', '.mcp.json',
+      // The standing rules every agy sub-agent loads through ~/.gemini/GEMINI.md, on every
+      // machine (2026-09-25). A .md in tools/ fails the extension filter below; a laptop client found it
+      // never arrived. Named one by one so no other markdown in tools/ is published by accident.
+      'tools/subagent-rules.md', 'tools/agent-rules.md',
+      // Read by hooks/check-session-start.mjs (plugin 0.4.55). a mirror-only machine got the new script but not this
+      // file, so its sessions started with Claude's memory off and no memory instructions at all.
+      'hooks/memory-instructions.md',
+      // The Outlook-safe email blocks every agent copies from (2026-10-23).
+      'tools/email-blocks.html'];
+    for (const d of ['tools', 'hooks']) {
+      let names = [];
+      try { names = readdirSync(join(BRAIN, d)); } catch { continue; }
+      for (const n of names) {
+        if (/\.(mjs|json|ps1|cmd)$/.test(n)) list.push(d + '/' + n);
+      }
+    }
+    // The mod's shared context layers: global, machine and group layers, which every
+    // agent on every machine reads from layers/ of its brain copy. Markdown, so named by layers-dist.mjs.
+    list.push(...servedLayerFiles(BRAIN));
+    return list;
+  }
+
+// A stat-only digest of the published files: name, size, mtime. The recall answer carries it (hardening item 3,
+// 2026-11-04), so a mirroring machine's mod pulls when it moves instead of a scheduled task asking every minute.
+// maxAgeMs: a digest younger than this is reused (the recall answer runs on every prompt of every agent).
+let distCache = { at: 0, v: null };
+function distVersion(maxAgeMs = 20_000) {
+  if (distCache.v && maxAgeMs > 0 && Date.now() - distCache.at < maxAgeMs) return distCache.v;
+  const h = createHash('sha256');
+  let n = 0;
+  for (const rel of distFiles().sort()) {
+    try {
+      const st = statSync(join(BRAIN, rel));
+      h.update(rel + ':' + st.size + ':' + Math.floor(st.mtimeMs) + '|');
+      n += 1;
+    } catch { /* absent on this machine, skip */ }
+  }
+  distCache = { at: Date.now(), v: { version: h.digest('hex').slice(0, 16), files: n } };
+  return distCache.v;
+}
+
+// Alerts on the event (hardening item 4): slow recalls and embedder timeouts go to the lead agent as agent messages,
+// when this instance has a messages service (brain.json messagesUrl) and an address to tell (brain.json alertsTo).
+// Neither is set on a stock install, so there the alert is only audited (H5, system review 2026-11-09).
+var serverAlerts = makeAlerts({
+  send: (text, key) => {
+    // The address comes from brain.json alertsTo (the lead agent of the install); with none set the alert is only audited, so a
+    // copy of the engine never messages an agent of ours (H5, system review 2026-11-09).
+    let to = '';
+    try { const c = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8')); if (typeof c.alertsTo === 'string' && c.alertsTo) to = c.alertsTo; } catch { /* none */ }
+    if (!to) return { sent: false, why: 'no alert address (brain.json alertsTo)' };
+    return sendSystemMessage({ token: TOKEN, to, text, key, messagesUrl: messagesUrlOf(BRAIN) });
+  },
+  audit: (l) => audit(l),
+});
+
 const KEEPALIVE_MS = 45_000;
 const KEEPALIVE_TEXT = 'keepalive';
 
+// A failure is written once, and again only when its reason changes (2026-11-09, a machine without AVX: a CPU without AVX wrote
+// the same line every 45 seconds while recall answered from keywords, as designed).
+let keepaliveFailed = '';
 async function touchModel(label) {
   try {
     const e = await getEmbedder();
     const t = Date.now();
     await e(KEEPALIVE_TEXT, { pooling: 'mean', normalize: true });
+    if (keepaliveFailed) audit('KEEPALIVE-OK ' + label + ' after: ' + keepaliveFailed);
+    keepaliveFailed = '';
     return Date.now() - t;
   } catch (err) {
-    audit('KEEPALIVE-FAIL ' + label + ' ' + String(err && err.message).slice(0, 80));
+    const why = String(err && err.message).slice(0, 80);
+    if (why !== keepaliveFailed) audit('KEEPALIVE-FAIL ' + label + ' ' + why);
+    keepaliveFailed = why;
     return null;
   }
 }
 
 if (ALLOW_PLAINTEXT) server.listen(PORT, host, () => {
+  // Who is listening, for the recall hook of an install that runs its own server (brain.json localServer, engine 0.4.90):
+  // it starts one only when this process is gone, instead of trying a start on every prompt.
+  try { writeFileSync(join(BRAIN, '.server-alive.json'), JSON.stringify({ pid: process.pid, port: PORT, at: new Date().toISOString() }) + '\n', 'utf8'); } catch { /* the hook then tries a start, which exits at once */ }
   process.stdout.write('brain server on ' + host + ':' + PORT
     + (PUBLIC ? '  PUBLIC, expose only behind a tunnel' : '  local only') + '\n');
   process.stdout.write('token file: ' + TOKEN_FILE + '\n');
@@ -1319,6 +1448,18 @@ if (ALLOW_PLAINTEXT) server.listen(PORT, host, () => {
   // server is what holds the process open anyway.
   setInterval(() => { touchModel('tick'); }, KEEPALIVE_MS);
 });
+
+// The decision review page (tools/decision-review.mjs): plain HTTP on 127.0.0.1 only, its own listener. Who may review
+// is set by brain.json decisionReviewIdentity: "local" (default) needs the per-install review key kept beside this
+// server's token; "tailscale" trusts the login header of tailscale serve. A reversal is sent as an agent message only
+// when a messages service is configured (brain.json messagesUrl). decisionReviewPort 0 or HAVOK_DECISIONS_PORT=0 turns
+// the page off.
+{
+  const decisionsPort = reviewPort(BRAIN);
+  if (decisionsPort > 0) {
+    startReviewListener({ brain: BRAIN, port: decisionsPort, getToken: () => TOKEN, keyFile: reviewKeyFile(CONFIG_DIR), audit, log: (l) => process.stdout.write(l + String.fromCharCode(10)) });
+  }
+}
 
 // ---- TLS ---------------------------------------------------------------------------------
 //
@@ -1334,10 +1475,9 @@ if (ALLOW_PLAINTEXT) server.listen(PORT, host, () => {
 // in the repo so every machine can pin it. The private key never leaves this machine and is
 // restricted by ACL to <user> and SYSTEM.
 //
-// PLAIN HTTP STAYS UP ON 8478 FOR NOW, on purpose. Switching to TLS-only before a laptop client has pulled
-// the client change would strand it with no brain at all, which is a worse outcome than one more
-// hour of the exposure that has already been open all day. 8478 closes the moment a laptop client confirms
-// it is talking TLS.
+// PLAIN HTTP ON 8478 IS CLOSED: every client talks TLS on 8443. The plain listener starts only when
+// ALLOW_PLAINTEXT is set, as a temporary fallback for a client that cannot yet reach TLS (checked on the host
+// 2026-11-03: nothing listens on 8478).
 // Bind to LOOPBACK and the TAILNET, never 0.0.0.0.
 //
 // The owner, 2026-08-22: make sure nobody else can reach this. 0.0.0.0 put the vault on every network
@@ -1369,7 +1509,11 @@ if (PUBLIC && tailnetAddresses().length === 0) {
 const TLS_PORT = Number(process.env.HAVOK_SERVER_TLS_PORT || 8443);
 // How often to look for a tailnet address that was absent at startup. Reading the interfaces once
 // is what left the brain loopback-only for every other machine after the 2026-09-16 reboot.
-const TAILNET_POLL_MS = Number(process.env.HAVOK_TAILNET_POLL_MS || 15000);
+// Where tools/install-tailnet-task.ps1 registered the event task HavokTailnetUp (it leaves .tailnet-event in the brain
+// folder), the sweep runs on Windows' network-connected event (POST /tailnet/sweep) and no timer runs (2026-11-05).
+// Anywhere else (an engine install with no such task) the 15-second timer stays. HAVOK_TAILNET_POLL_MS overrides both.
+const TAILNET_POLL_MS = process.env.HAVOK_TAILNET_POLL_MS !== undefined ? Number(process.env.HAVOK_TAILNET_POLL_MS) : existsSync(join(BRAIN, '.tailnet-event')) ? 0 : 15000;
+let tailnetSweep = null;
 
 if (HAVE_TLS) {
   import('node:https').then(({ createServer: createHttps }) => {
@@ -1390,7 +1534,9 @@ if (HAVE_TLS) {
         // Loopback taken means another brain server is already serving. Exit: the tailnet watcher's
         // timer would otherwise keep this copy alive forever. Ten of them had piled up by 2026-09-17,
         // each started by a session-start check whose 2 second probe hit a server frozen by a write.
-        if (e && e.code === 'EADDRINUSE' && addr === '127.0.0.1' && !ALLOW_PLAINTEXT) { process.stdout.write('brain server TLS already listening on ' + addr + ', exiting' + tail); process.exit(0); }
+        // The plaintext listener is no reason to stay: a second copy on the same brain folder would also serve and commit.
+        // Only a copy whose TLS port was set on purpose (HAVOK_SERVER_TLS_PORT, a side-by-side install) may differ.
+        if (e && e.code === 'EADDRINUSE' && addr === '127.0.0.1' && (!ALLOW_PLAINTEXT || !process.env.HAVOK_SERVER_TLS_PORT)) { process.stdout.write('brain server TLS already listening on ' + addr + ', another server serves this machine, exiting' + tail); process.exit(0); }
         if (e && e.code === 'EADDRINUSE') { process.stdout.write('brain server TLS already listening on ' + addr + tail); return; }
         process.stdout.write('brain server TLS failed on ' + addr + ': ' + String(e && e.message).slice(0, 120) + tail);
         if (onFail) onFail(addr);
@@ -1405,6 +1551,7 @@ if (HAVE_TLS) {
       intervalMs: TAILNET_POLL_MS,
       bind: (addr) => listenOn(addr, (a) => tailnet.forget(a)),
     });
+    tailnetSweep = tailnet;
   }).catch(() => { /* no https available: the plaintext listener still serves */ });
 } else {
   process.stdout.write('NO TLS CERT, serving plaintext only. Generate one to encrypt the transport.\n');

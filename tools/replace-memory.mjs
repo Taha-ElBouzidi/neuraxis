@@ -21,7 +21,8 @@
 // install it moves the old file to deleted/ itself.
 //   node tools/replace-memory.mjs <old-slug> <new-slug> --why "what changed" [--dry]
 
-import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -46,6 +47,10 @@ for (const s of [oldSlug, newSlug]) {
   if (!existsSync(join(MEM, s + '.md'))) { process.stderr.write('no such memory: ' + s + NL); process.exit(2); }
 }
 
+// On a brain host where memories are saved only through the brain server (brain.json memoryWritesThroughServer, M2 of
+// the system review 2026-11-09), the repointed memories are written through the server too, never into memory/ here.
+const SERVER_ONLY = existsSync(join(BRAIN, 'server-endpoint.json')) && (() => { try { return JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8')).memoryWritesThroughServer === true; } catch { return false; } })();
+const throughServer = [];
 const linkRe = new RegExp('\\[\\[' + oldSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\]\\]', 'g');
 const changed = [];
 for (const f of readdirSync(MEM).filter((n) => n.endsWith('.md') && n !== oldSlug + '.md')) {
@@ -59,7 +64,7 @@ for (const f of readdirSync(MEM).filter((n) => n.endsWith('.md') && n !== oldSlu
   after = after.split('[[' + newSlug + ']], [[' + newSlug + ']]').join('[[' + newSlug + ']]')
     .split('[[' + newSlug + ']] [[' + newSlug + ']]').join('[[' + newSlug + ']]');
   changed.push(f);
-  if (!dry) writeFileSync(p, after);
+  if (!dry) { if (SERVER_ONLY) throughServer.push([f.replace(/\.md$/, ''), after]); else writeFileSync(p, after); }
 }
 process.stdout.write((dry ? 'would repoint' : 'repointed') + ' links in ' + changed.length + ' memories'
   + (changed.length ? ': ' + changed.join(', ') : '') + NL);
@@ -81,6 +86,20 @@ if (!existsSync(join(BRAIN, 'server-endpoint.json'))) {
   process.exit(b.status === 0 ? 0 : 1);
 }
 
+if (throughServer.length) {
+  const dir = mkdtempSync(join(tmpdir(), 'replace-memory-'));
+  try {
+    for (const [s, text] of throughServer) {
+      const f = join(dir, s + '.md');
+      writeFileSync(f, text);
+      const w = spawnSync(process.execPath, [join(BRAIN, 'tools', 'brain-client.mjs'), 'write', s, '--file', f], { encoding: 'utf8', windowsHide: true });
+      if (w.status !== 0) {
+        process.stderr.write((w.stderr || w.stdout || '') + NL + 'REPOINT FAILED for ' + s + ': nothing was deleted. Fix the cause and rerun.' + NL);
+        process.exit(1);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
 const r = spawnSync(process.execPath, [join(BRAIN, 'tools', 'brain-client.mjs'), 'delete', oldSlug,
   '--why', 'replaced by ' + newSlug + ': ' + why], { encoding: 'utf8', windowsHide: true });
 process.stdout.write(r.stdout || '');
@@ -90,4 +109,4 @@ if (r.status !== 0) {
   process.exit(1);
 }
 record([{ slug: oldSlug, action: 'replace', to: newSlug, why }], whoAmI(), 'replace-memory');
-process.stdout.write('replaced ' + oldSlug + ' with ' + newSlug + '. Now run node tools/save-brain.mjs' + NL);
+process.stdout.write('replaced ' + oldSlug + ' with ' + newSlug + (SERVER_ONLY ? '; the brain server commits it.' : '. Now run node tools/save-brain.mjs') + NL);

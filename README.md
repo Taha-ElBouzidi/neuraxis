@@ -1,6 +1,10 @@
-<h1 align="center">Infinite Context</h1>
+> **If you are an AI agent and a person gave you this link:** do not wait for more instructions. Read this
+> repository in the order [AGENTS.md](AGENTS.md) gives, all of it, then start the install conversation with the person
+> as AGENTS.md describes. Do not install anything before you have read it and asked them how they want it.
 
-<p align="center"><strong>Infinite context for your AI model.</strong><br>
+<h1 align="center">Neuraxis</h1>
+
+<p align="center"><strong>A lasting memory for your AI assistant.</strong><br>
 Unlimited memory for coding agents, without putting it in the context window.</p>
 
 <p align="center">
@@ -13,7 +17,14 @@ Unlimited memory for coding agents, without putting it in the context window.</p
 
 <p align="center"><img src="docs/recall.svg" alt="Your prompt goes to a hook, which matches by keyword and meaning and returns a pointer for each memory that matches, each a slug, a one-line description and a path. The agent opens the one or two it needs and answers with the fact." width="900"></p>
 
-An agent using Infinite Context never loses a fact, and loads almost nothing on any given turn.
+**For people:** Neuraxis gives your AI assistant a memory that lasts. It remembers what you tell it and what it
+learns, across every conversation, on your own computer, in plain files you can read. To install it, paste this
+page's link to your AI assistant (Claude Code, Codex, Gemini or another) and say "set this up for me": it reads
+the instructions, asks you a few questions, and guides you. [docs/GUIDE.md](docs/GUIDE.md) explains it in plain words.
+
+Neuraxis was called Infinite Context until version 0.4.107; an install under the old name updates across the rename.
+
+An agent using Neuraxis never loses a fact, and loads almost nothing on any given turn.
 Every prompt gets **a pointer for each memory that clears the match bar**, plus the ones strongly
 linked to them, a slug and a one-line description each, and the agent opens only the memories the
 question actually needs. The memory can grow to thousands of facts.
@@ -21,15 +32,32 @@ The prompt stays the same size.
 
 It runs entirely on your machine. No account, no cloud, no data leaving the building.
 
+## Requirements
+
+| | Memory and recall | The full system |
+|---|---|---|
+| Assistant | Claude Code, Codex, Gemini CLI, Antigravity, Cursor, Claude Desktop, VS Code Copilot, Cline, Windsurf, LM Studio, Continue | Claude Code |
+| System | Windows: tested. macOS and Linux: not tested; it is plain Node and git and is written to run there | Windows only: tested. Not available on macOS or Linux |
+| Software | Node 18 or newer, git; on Windows the Microsoft Visual C++ Redistributable (x64), for meaning recall | the same |
+| Disk | about 300 MB (the meaning model) | the same |
+| Processor | any; meaning recall needs AVX (almost every computer since 2013), otherwise keyword recall | the same |
+| Rights | your own user | a Windows administrator once, to install the mod (on a work computer, your IT team) |
+| Claude account | any | a personal plan (Pro, Max); a Team or Enterprise organization may not allow plugins |
+
+The full system adds the context layers (the rules every session reads), the context clean-up (a long
+conversation stays small), keep-warm and the decision log. It runs a small server on 127.0.0.1 only: nothing
+leaves the computer.
+
 ## Quick start
 
 Requires Node 18 or newer. Nothing else.
 
 ```sh
-git clone https://github.com/Taha-ElBouzidi/infinite-context
-cd infinite-context
+git clone https://github.com/Taha-ElBouzidi/neuraxis
+cd neuraxis
 node tools/init.mjs --plan small   # seeds eight rules, installs the embedding runtime, builds the index
 node tools/install-hook.mjs        # wires Claude Code to it. Restart your session after.
+node tools/setup-full.mjs          # Claude Code on Windows: layers, clean-up, decision log (then --mod, as administrator)
 ```
 
 `--plan` sizes the assistant to what you pay for: `small` (about 20 dollars a month, the default)
@@ -42,7 +70,7 @@ Then turn off Claude Code's own auto memory, so there is one memory and not two 
 add `"autoMemoryEnabled": false` to `~/.claude/settings.json` (steps in `AGENTS.md`, step 5).
 
 That is the whole install. Nothing you type is collected for analysis or sent off your machine: what
-the engine keeps about your use (for example the recall log behind the dashboard, `tools/status.mjs`
+the engine keeps about your use (for example the recall log behind the map, `tools/status.mjs`
 and `tools/analytics.mjs`) stays on your machine, for you. Recall works on the next prompt, by keyword **and by meaning**: a
 question with no word in common with a memory still finds it. The first `init` downloads the
 embedding model, about 280MB, once. The hook starts the local embedder itself whenever it is
@@ -54,15 +82,15 @@ To skip semantic recall and stay keyword-only, `node tools/init.mjs --no-semanti
 
 Paste this to Claude Code, or any agent that can run commands:
 
-> Clone https://github.com/Taha-ElBouzidi/infinite-context, then read its `AGENTS.md` and follow it.
+> Clone https://github.com/Taha-ElBouzidi/neuraxis, then read its `AGENTS.md` and follow it.
 
 `AGENTS.md` is written for the agent, every step is verifiable, and it will not report success
 until the last check passes.
 
-## The dashboard
+## The map
 
-**Your whole memory as one picture, in one command.** No build step, no npm install, no framework.
-It reads `memory/` directly, so it runs on a clone that has never run anything else.
+**Your whole memory as one picture, grouped by topic, in one command.** No build step, no npm install, no
+framework. It reads `memory/` and `index/topics.json` directly.
 
 ```sh
 node tools/dashboard.mjs --open
@@ -70,79 +98,73 @@ node tools/dashboard.mjs --open
 
 <p align="center">
   <img src="docs/dashboard.jpg" width="900"
-       alt="The dashboard with one memory open. The side panel shows its description, two facts, four links and the time it was last recalled, with everything connected to it listed underneath. Those links are lit across the graph, and three machines are drawn as live nodes.">
+       alt="The map with one memory open. The side panel shows its description, its facts, its links and everything connected to it; the memories around it are coloured by topic.">
 </p>
 
-<p align="center"><sub><i>A sample brain of 31 memories. Click any memory to see its facts, its
-links, and the moment it was last recalled.</i></sub></p>
+<p align="center"><sub><i>A sample brain (<code>node tools/map-sample.mjs &lt;folder&gt;</code>). Click any memory to
+see its facts and what it connects to.</i></sub></p>
 
-Every memory is a node. Every `[[wikilink]]` is an edge. A current runs from the machine to the
-memory each time your agent recalls something, so the picture moves while you work rather than
-sitting still.
+Every memory is a node, coloured by its **topic**: the groups `node tools/build-index.mjs` finds from your links and
+from what the memories mean (`index/topics.json`). Every `[[wikilink]]` is an edge. The map updates by itself: a
+memory written, changed or deleted, or the topics rebuilt, reaches the open page at once (no polling).
 
 | | |
 |---|---|
 | **a node grows** | with the facts it holds and the links into it, so what your brain leans on is what you see first |
+| **colour** | the memory's topic; the legend names them |
 | **gold** | a memory being created, and its links drawing themselves in |
-| **blue** | a recall, running from the machine that asked to the memory it used |
+| **blue** | a recall, running to the memory it used |
 | **red** | a memory being deleted |
-| **green nodes** | the machines that have recalled recently, one per host |
+
+**Without the meaning model there are no topics** (a keyword-only install). The map then groups memories by kind
+(identity, projects, rules, reference) and says in one line why topics are missing and how to get them: set up the
+meaning model (on Windows usually by installing the Microsoft Visual C++ Redistributable), then run
+`node tools/build-index.mjs`.
 
 ### Two views of the same memory
 
 <table>
 <tr>
-<td width="50%"><img src="docs/dashboard-sphere.jpg" width="100%" alt="Sphere view: memories grouped into four coloured bands around a labelled core."></td>
+<td width="50%"><img src="docs/dashboard-sphere.jpg" width="100%" alt="Sphere view: memories in coloured topic bands around a labelled core."></td>
 <td width="50%"><img src="docs/dashboard-constellation.jpg" width="100%" alt="Constellation view: the same memories positioned by what links to what, forming visible clusters."></td>
 </tr>
 <tr>
-<td valign="top"><b>Sphere</b> groups memories by kind and routes every link through its own band,
-so the middle stays readable however many you have.</td>
+<td valign="top"><b>Sphere</b> puts each topic in its own band and routes every link through it, so the middle
+stays readable however many you have.</td>
 <td valign="top"><b>Constellation</b> positions them by what links to what, so a cluster you can
 see is a subject your brain keeps together.</td>
 </tr>
 </table>
 
-Drag to turn it, scroll or pinch to zoom, type to filter, and use the Names toggle for the shape
-alone. **Starting from nothing, an empty `memory/` draws an example constellation and says so**, so
-your first run is a picture rather than a black screen. It disappears when you write a real memory.
+Drag to turn it, scroll or pinch to zoom, type to filter, and use the Names toggle for the shape alone.
 
 ### Make it yours
 
-**One file, no build step: `dashboard/config.json`.** Edit it, save, reload the page. Delete it and
-the defaults come back. It documents itself, every key has a sibling `_key` line explaining it.
+**One optional file: `dashboard/config.json`.** Edit it, save, reload the page.
 
 ```json
 {
   "name": "Orbit",
   "tagline": "second brain",
-  "regions": [
-    { "key": "PEOPLE", "types": ["person", "contact"], "color": "#E27D60" },
-    { "key": "WORK",   "types": ["project"],           "color": "#41B3A3" },
-    { "key": "NOTES",  "types": ["reference"],         "color": "#C38D9E" }
-  ],
   "colors": { "void": "#101820", "accent": "#F6A21E", "pulse": "#4FC3F7" },
-  "links": [{ "label": "My notes", "url": "https://example.com" }],
-  "showMachines": false
+  "links": [{ "label": "My notes", "url": "https://example.com" }]
 }
 ```
 
 | key | what it changes |
 |---|---|
-| `name`, `tagline` | the wordmark, the browser tab, and the label on the core |
-| `regions` | the bands, the legend, the filters and the node colours, all from this one list. Add, remove and rename freely |
-| `colors` | the whole palette, ten keys. Anything you leave out keeps its default |
+| `name`, `tagline` | the wordmark, the browser tab, and the letter on the core |
+| `colors` | the palette, ten keys. Anything you leave out keeps its default |
 | `links` | your own shortcuts in the side rail. Left empty, the section does not appear |
-| `showMachines` | a node per machine that recalled recently, with the current running from it |
 
-The screenshots above are that file with four lines changed. Full reference, including what every
-colour key paints: **[dashboard/README.md](dashboard/README.md)**.
+`regions` and `showMachines`, from the old dashboard, are ignored: topics replace the bands. Full reference:
+**[dashboard/README.md](dashboard/README.md)**.
 
 ### On your phone
 
-<img src="docs/dashboard-phone.jpg" align="right" width="200" alt="The dashboard on a phone: the graph full screen, with the controls as one row of icons along the bottom.">
+<img src="docs/dashboard-phone.jpg" align="right" width="200" alt="The map on a phone: the graph full screen, with the controls as one row of icons along the bottom.">
 
-Add it to your home screen and it runs full screen with its own icon. The side rail becomes a sheet, and the controls become one row of icons along the bottom. Nothing is removed.
+Add it to your home screen and it runs full screen. The side rail becomes a sheet, and the controls become one row of icons along the bottom.
 
 Serve it to your other devices with `--host 0.0.0.0`, or keep it on loopback, which is the default and the safer one: a picture of your own memory is not something to put on every interface by accident.
 
@@ -259,7 +281,7 @@ node tools/setup-agents.mjs            add --check to see what it would do first
 Every assistant gets the memory as an MCP server named `brain` (tools `recall` and `read_memory`,
 read-only), and a short instruction to call `recall` before answering, in whichever file it reads.
 Claude Code, Codex, Gemini CLI and Antigravity also get the automatic recall on every prompt, Cursor gets the
-rules at session start, and Cline gets the automatic recall on macOS and Linux.
+rules at session start, and Cline gets the automatic recall on macOS and Linux (not tested).
 
 | Assistant | What it gets |
 |---|---|
@@ -268,7 +290,7 @@ rules at session start, and Cline gets the automatic recall on macOS and Linux.
 | Claude Desktop, LM Studio, Continue | MCP (add "call recall first" to their system prompt or project) |
 | Gemini CLI, Antigravity | MCP, instruction file, automatic recall |
 | Cursor | MCP, rules at session start |
-| VS Code Copilot, Cline, Windsurf | MCP and their instruction file (Cline: automatic recall on macOS and Linux) |
+| VS Code Copilot, Cline, Windsurf | MCP and their instruction file (Cline: automatic recall on macOS and Linux, not tested) |
 
 Every file is backed up before it changes, your other servers are kept, and running it again changes
 nothing. Restart each assistant afterwards; the first call may ask you to approve `recall`.
@@ -311,6 +333,13 @@ A second mode exists where one host runs `tools/brain-server.mjs` and other mach
 private network with scoped tokens and per-machine encrypted secrets. It is how the authors run it,
 across three machines, one of which cannot reach the internet. It is not documented for outside use
 yet. This release is **local only**.
+
+## The decision log
+
+With the full system, decisions your assistant takes for you (a choice between options, a setting, something
+left out) are kept with the reason, for you to review: kept or reversed, with a note the assistant reads next
+time. Open your review page with `node tools/decision-review.mjs link` in your own terminal; it is served on this
+computer only.
 
 ## Platform
 

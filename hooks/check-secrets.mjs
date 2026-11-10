@@ -3,8 +3,9 @@
 // hook is its backup through dispatch.mjs). Not a git repository or no staged diff: nothing to scan.
 // A diff that cannot be read in time blocks: a slow scan must never let the commit through unchecked.
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { isCommitAttempt, commitDir, secretsIn, secretDenyReason, SCAN_UNFINISHED } from './secret-rules.mjs';
+import { isCommitAttempt, commitDir, secretsIn, secretDenyReason, SCAN_UNFINISHED, skipsVerify, NO_VERIFY_REASON, tokenFiles, tokensFrom } from './secret-rules.mjs';
 
 const SCAN_MS = 10000;
 
@@ -21,6 +22,7 @@ try { data = JSON.parse(readStdin() || '{}'); } catch { process.exit(0); }
 
 const cmd = String((data.tool_input || {}).command || '');
 if (!isCommitAttempt(cmd)) process.exit(0);
+if (skipsVerify(cmd)) deny(NO_VERIFY_REASON);
 
 let diff = '';
 try {
@@ -31,6 +33,7 @@ try {
 }
 if (!diff) process.exit(0);
 
-const hits = secretsIn(diff);
+const known = tokenFiles(homedir()).flatMap((p) => { try { return tokensFrom(p, readFileSync(p, 'utf8')); } catch { return []; } });
+const hits = secretsIn(diff, known);
 if (hits.length) deny(secretDenyReason(hits));
 process.exit(0);

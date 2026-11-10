@@ -498,9 +498,21 @@ if (parity.missing.length || parity.stale.length || parity.descChanged) {
     if (parity.stale.length) why.push(parity.stale.length + ' removed');
     if (parity.descChanged) why.push('descriptions changed');
     console.log('rebuilding vectors (' + why.join(', ') + ')');
-    execFileSync(process.execPath, [join(BRAIN, 'tools', 'build-embeddings.mjs')], { stdio: 'inherit' });
-    const after = vectorParity();
-    if (after.missing.length) console.error(`WARNING: ${after.missing.length} still without a vector after rebuild`);
+    // The keyword index above is complete either way: a model that cannot load leaves meaning recall off and says why,
+    // it never fails the build (a clean Windows without the Visual C++ runtime, Windows Sandbox test 2026-11-10:
+    // onnxruntime-node's binding did not load and init stopped with "Nothing is findable").
+    try {
+      execFileSync(process.execPath, [join(BRAIN, 'tools', 'build-embeddings.mjs')], { stdio: 'inherit' });
+      const after = vectorParity();
+      if (after.missing.length) console.error(`WARNING: ${after.missing.length} still without a vector after rebuild`);
+    } catch {
+      console.error('');
+      console.error('  MEANING RECALL IS OFF: the embedding model did not run here. Recall works by keyword until it does.');
+      console.error('  On Windows this is most often the missing Microsoft Visual C++ Redistributable (x64, 2015 to 2022):');
+      console.error('  https://aka.ms/vs/17/release/vc_redist.x64.exe . Install it, then run node tools/build-index.mjs again.');
+      console.error('  A model download that failed looks the same: running build-index again retries it.');
+      console.error('');
+    }
   }
 }
 

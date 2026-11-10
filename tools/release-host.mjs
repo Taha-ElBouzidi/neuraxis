@@ -4,7 +4,7 @@
 // answers (POST /recall/turn and GET /layers/versions) carry the latest release, so a machine learns of a release on
 // its next message and nothing runs on a timer to look (feedback_events_not_watchdogs).
 //
-// Layout of the folder (D:/dev/Havok/RELEASES beside the brain, or HAVOK_RELEASES_DIR):
+// Layout of the folder (a RELEASES folder beside the brain, or HAVOK_RELEASES_DIR):
 //   latest.json                           the manifest of the latest release
 //   <version>/release.json                each release's manifest, kept, so a machine can roll back to it
 //   <version>/havok-release-<version>.zip
@@ -59,12 +59,13 @@ export function releaseZip(root, version) {
 export function releaseSummary(root) {
   const m = readManifest(join(root, 'latest.json'));
   if (!m || !releaseZip(root, m.version)) return null;
-  return { version: m.version, sha256: m.sha256, size: m.size };
+  return { version: m.version, sha256: m.sha256, size: m.size, ...(m.signature ? { signature: m.signature } : {}) };
 }
 
 // Publishes one release. Refused: a bad version, a version not above the latest (a number names one zip for ever, so
 // two machines holding the same number hold the same bytes), a missing file, a file that is not a zip.
-export function publishRelease(root, { zip, version, parts = {}, now = Date.now() }) {
+// sign: (manifest) => signature (C2, release-sign.mjs); a release published without one is refused by every updater.
+export function publishRelease(root, { zip, version, parts = {}, now = Date.now(), sign = null }) {
   if (!VERSION_RE.test(String(version))) throw new Error('bad version "' + String(version).slice(0, 40) + '": expected three numbers like 0.1.12');
   if (!zip || !existsSync(zip)) throw new Error('no zip at ' + zip);
   const buf = readFileSync(zip);
@@ -73,6 +74,7 @@ export function publishRelease(root, { zip, version, parts = {}, now = Date.now(
   if (latest && compareVersions(version, latest.version) <= 0) throw new Error('version ' + version + ' is not above the latest published release ' + latest.version);
   if (existsSync(join(root, version))) throw new Error('version ' + version + ' was already published once; publish a higher number');
   const manifest = { version, file: zipName(version), sha256: sha(buf), size: buf.length, publishedAt: new Date(now).toISOString(), parts: { mod: version, ...parts } };
+  if (sign) manifest.signature = sign(manifest);
   mkdirSync(join(root, version), { recursive: true });
   copyFileSync(zip, join(root, version, zipName(version)));
   if (sha(readFileSync(join(root, version, zipName(version)))) !== manifest.sha256) throw new Error('the copied zip does not match its source');

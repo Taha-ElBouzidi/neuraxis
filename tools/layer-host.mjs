@@ -1,8 +1,9 @@
-// The layer host (context release, 2026-11-02). The context layers HAVOK owns (global.md, machine/<MACHINE>.md,
-// group/<name>.md) live in their own folder on the host, D:/dev/Havok/LAYERS, outside the brain repo, so a layer
+// The layer host (context release, 2026-11-02). The context layers HAVOK owns (global.md and group/<name>.md)
+// live in their own folder on the host, a LAYERS folder beside the brain, outside the brain repo, so a layer
 // change no longer rides the code sync of every machine. The brain server serves each layer with a version, the
 // sha256 of its text, so the mod asks for the versions before a message and downloads a layer only when it changed.
-// The agent layer is not here: each agent writes its own, locally.
+// The agent layer is not here: each agent writes its own, locally. Nor is the machine layer since mod 0.1.24: it is a
+// local file on each machine (~/.claude/havok-mod/layers/machine.md), so the machine/<name> route was dropped in 0.1.36.
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -12,12 +13,12 @@ export const LAYER_MAX_CHARS = 20000;
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
-// A key is "global", "machine/<name>" or "group/<name>", nothing else. A path is never built from anything that
+// A key is "global" or "group/<name>", nothing else. A path is never built from anything that
 // fails this, so .., a backslash or an absolute path cannot reach the disk.
 export function validKey(key) {
   if (key === 'global') return true;
-  const m = /^(machine|group)\/([^/]+)$/.exec(String(key || ''));
-  return !!m && NAME.test(m[2]);
+  const m = /^group\/([^/]+)$/.exec(String(key || ''));
+  return !!m && NAME.test(m[1]);
 }
 
 const fileOf = (root, key) => join(root, key + '.md');
@@ -37,11 +38,11 @@ export function readLayer(root, key) {
   return { status: 200, text, version: sha(text) };
 }
 
-// The versions of the layers that apply to one machine and its groups. An absent, invalid or oversized layer is
+// The versions of the layers that apply to one machine: the global one and its groups (the machine name is kept in
+// the signature for the callers; machine layers are local files now). An absent, invalid or oversized layer is
 // left out, so the caller keeps what it has.
 export function layerVersions(root, machine, groups) {
   const keys = ['global'];
-  if (machine) keys.push('machine/' + machine);
   for (const g of Array.isArray(groups) ? groups : []) keys.push('group/' + g);
   const out = {};
   for (const k of keys) {

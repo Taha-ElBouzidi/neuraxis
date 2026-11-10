@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 
 export function isInstall(dir) {
-  try { return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name === 'infinite-context'; } catch { return false; }
+  try { return /^(neuraxis|infinite-context)$/.test(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name); } catch { return false; }
 }
 
 // One set of Claude Code settings on every machine, like the brain (the owner, 2026-10-07). The cause that day: the

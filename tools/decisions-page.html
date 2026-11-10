@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent decisions</title>
+<style>
+:root {
+  --bg: #f6f6f3; --card: #ffffff; --text: #1d1d1b; --muted: #66665f; --line: #deded8;
+  --accent: #2d5bd1; --kept: #1f7a3f; --reversed: #b3261e; --waiting: #9a6b00;
+  --kept-bg: #e5f3ea; --reversed-bg: #fbe7e5; --waiting-bg: #fbf0d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151614; --card: #1f201d; --text: #ecece6; --muted: #a2a29a; --line: #34352f;
+    --accent: #8aa8ff; --kept: #6fcf8f; --reversed: #ff8a80; --waiting: #f0c060;
+    --kept-bg: #1d3325; --reversed-bg: #3a1f1d; --waiting-bg: #3a3018;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 920px; margin: 0 auto; padding: 20px 16px 60px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0 0 16px; font-size: 14px; }
+.filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; align-items: end; }
+.filters label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
+select, textarea, button { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 6px; }
+select { padding: 5px 8px; min-width: 130px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+.top { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+.what { font-weight: 600; font-size: 16px; margin: 0; overflow-wrap: anywhere; }
+.badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; white-space: nowrap; }
+.badge.waiting { color: var(--waiting); background: var(--waiting-bg); }
+.badge.kept { color: var(--kept); background: var(--kept-bg); }
+.badge.reversed { color: var(--reversed); background: var(--reversed-bg); }
+.meta { color: var(--muted); font-size: 13px; margin: 4px 0 8px; overflow-wrap: anywhere; }
+.field { margin: 6px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.field b { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; display: block; white-space: normal; }
+.rel { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.rel span { font-size: 12px; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; overflow-wrap: anywhere; }
+.review { color: var(--muted); font-size: 13px; margin-top: 8px; overflow-wrap: anywhere; }
+.act { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: flex-start; }
+.act textarea { flex: 1 1 260px; min-height: 38px; padding: 6px 8px; resize: vertical; }
+.act button { padding: 7px 14px; cursor: pointer; font-weight: 600; }
+.act button.k { border-color: var(--kept); color: var(--kept); }
+.act button.r { border-color: var(--reversed); color: var(--reversed); }
+.act button:disabled { opacity: .5; cursor: default; }
+.msg { font-size: 13px; color: var(--muted); width: 100%; }
+.empty, .err { color: var(--muted); padding: 24px 0; text-align: center; }
+.err { color: var(--reversed); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Agent decisions</h1>
+  <p class="sub" id="sub">Loading.</p>
+  <div class="filters">
+    <label>Agent <select id="f-agent"><option value="">All</option></select></label>
+    <label>Area <select id="f-area"><option value="">All</option></select></label>
+    <label>State
+      <select id="f-state">
+        <option value="">All</option>
+        <option value="waiting" selected>Waiting</option>
+        <option value="kept">Kept</option>
+        <option value="reversed">Reversed</option>
+      </select>
+    </label>
+  </div>
+  <div id="list"></div>
+</main>
+<script>
+(function () {
+  // Works behind a proxy mount (/decisions/) and on the listener itself (/).
+  var base = location.pathname.replace(/\/index\.html$/, '');
+  if (base.slice(-1) !== '/') base += '/';
+  var api = base + 'api/decisions';
+  var mayReview = false;
+  // Local identity (tools/decision-review.mjs): the review key arrives after the # of the link, is kept for this tab
+  // only, and is removed from the address bar so it is not bookmarked or shared by accident.
+  var KEY = 'decisionReviewKey';
+  var m = /(?:^#|&)key=([A-Za-z0-9_-]+)/.exec(location.hash);
+  try {
+    if (m) { sessionStorage.setItem(KEY, m[1]); history.replaceState(null, '', location.pathname + location.search); }
+  } catch (e) { /* storage off: the key stays in the address bar */ }
+  var reviewKey = m ? m[1] : '';
+  try { reviewKey = sessionStorage.getItem(KEY) || reviewKey; } catch (e) { /* storage off */ }
+  function headers(extra) {
+    var h = extra || {};
+    if (reviewKey) h['x-review-key'] = reviewKey;
+    return h;
+  }
+  var el = function (id) { return document.getElementById(id); };
+
+  function node(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function when(iso) {
+    var d = new Date(iso);
+    if (isNaN(d)) return iso || '';
+    return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  }
+  function fillSelect(sel, values) {
+    var keep = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    values.forEach(function (v) { var o = node('option', null, v); o.value = v; sel.appendChild(o); });
+    sel.value = values.indexOf(keep) >= 0 ? keep : '';
+  }
+  function field(label, text) {
+    var f = node('div', 'field');
+    f.appendChild(node('b', null, label));
+    f.appendChild(document.createTextNode(text));
+    return f;
+  }
+
+  function card(d) {
+    var c = node('div', 'card');
+    var top = node('div', 'top');
+    top.appendChild(node('p', 'what', d.what));
+    top.appendChild(node('span', 'badge ' + d.state, d.state));
+    c.appendChild(top);
+    var meta = [d.agent || '(no agent)', d.machine || '', when(d.at), d.area ? 'area ' + d.area : '', d.id, d.backfilled ? 'backfilled' : '']
+      .filter(Boolean).join(' . ');
+    c.appendChild(node('div', 'meta', meta));
+    c.appendChild(field('Why', d.why));
+    if (d.options_left_out) c.appendChild(field('Options left out', d.options_left_out));
+    if (d.relates_to && d.relates_to.length) {
+      var rel = node('div', 'rel');
+      d.relates_to.forEach(function (r) { rel.appendChild(node('span', null, r)); });
+      var f = node('div', 'field'); f.appendChild(node('b', null, 'Relates to')); f.appendChild(rel);
+      c.appendChild(f);
+    }
+    if (d.review) {
+      c.appendChild(node('div', 'review', 'Marked ' + d.review.state + ' by ' + (d.review.by || '?') + ' on ' + when(d.review.at)
+        + (d.review.note ? ': ' + d.review.note : '')));
+    }
+    if (mayReview) {
+      var act = node('div', 'act');
+      var note = node('textarea'); note.placeholder = 'Note (optional)'; note.maxLength = 2000;
+      var k = node('button', 'k', 'Kept'); var r = node('button', 'r', 'Reversed');
+      var msg = node('div', 'msg');
+      function mark(state) {
+        k.disabled = r.disabled = true; msg.textContent = 'Saving.';
+        fetch(api + '/' + encodeURIComponent(d.id) + '/review', {
+          method: 'POST', headers: headers({ 'content-type': 'application/json' }), credentials: 'same-origin',
+          body: JSON.stringify({ state: state, note: note.value })
+        }).then(function (res) { return res.json().then(function (j) { return { ok: res.ok, j: j }; }); })
+          .then(function (x) {
+            if (!x.ok) { msg.textContent = 'Not saved: ' + (x.j.error || 'error'); k.disabled = r.disabled = false; return; }
+            var m = x.j.message;
+            msg.textContent = 'Saved as ' + state + '.' + (m ? (m.sent ? ' The agent was sent a message.' : ' The agent could not be told: ' + m.why) : '');
+            setTimeout(load, m && !m.sent ? 4000 : 800);
+          })
+          .catch(function () { msg.textContent = 'Not saved: the server did not answer.'; k.disabled = r.disabled = false; });
+      }
+      k.onclick = function () { mark('kept'); };
+      r.onclick = function () { mark('reversed'); };
+      act.appendChild(note); act.appendChild(k); act.appendChild(r); act.appendChild(msg);
+      c.appendChild(act);
+    }
+    return c;
+  }
+
+  function load() {
+    var q = new URLSearchParams();
+    ['agent', 'area', 'state'].forEach(function (k) { var v = el('f-' + k).value; if (v) q.set(k, v); });
+    q.set('limit', '500');
+    fetch(api + '?' + q.toString(), { credentials: 'same-origin', headers: headers() }).then(function (r) { return r.json(); }).then(function (j) {
+      if (!j.decisions) {
+        el('sub').textContent = j.error || 'The decision log did not answer.';
+        el('list').textContent = '';
+        return;
+      }
+      mayReview = !!j.mayReview;
+      fillSelect(el('f-agent'), j.agents || []);
+      fillSelect(el('f-area'), j.areas || []);
+      el('sub').textContent = j.waiting + ' waiting for review. '
+        + (mayReview ? 'Reviewing as ' + j.viewer + '.' : 'Read only' + (j.hint ? ': ' + j.hint : '') + '.');
+      var list = el('list'); list.textContent = '';
+      if (!j.decisions.length) { list.appendChild(node('div', 'empty', 'No decisions match.')); return; }
+      j.decisions.forEach(function (d) { list.appendChild(card(d)); });
+    }).catch(function () { el('list').textContent = ''; el('list').appendChild(node('div', 'err', 'The decision log did not answer.')); });
+  }
+  ['f-agent', 'f-area', 'f-state'].forEach(function (id) { el(id).onchange = load; });
+  load();
+})();
+</script>
+</body>
+</html>

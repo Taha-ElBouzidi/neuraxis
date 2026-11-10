@@ -1,4 +1,4 @@
-# CHANGELOG.md, Infinite Context
+# CHANGELOG.md, Neuraxis
 
 Append-only. Never edit or delete past entries. Never rewrite history.
 Full entries for features and breaking changes. Brief one-liners for small fixes.

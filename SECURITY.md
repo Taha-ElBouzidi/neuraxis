@@ -1,4 +1,4 @@
-# Security, Infinite Context
+# Security, Neuraxis
 
 This software runs entirely on your own machine and, in multi-machine mode, on your own private
 network. It stores memory as plain markdown files you control. It makes no outbound connections

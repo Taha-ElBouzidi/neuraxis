@@ -71,6 +71,24 @@ for (const entry of list) {
   }
 }
 
+// --remove (docs/GUIDE.md "How to remove it"): takes out this brain's recall hook only, every other hook and setting
+// kept, with a copy of settings.json made first.
+if (process.argv.includes('--remove')) {
+  if (!existed) { say('no settings.json: nothing to remove'); process.exit(0); }
+  const kept = [];
+  let removed = 0;
+  for (const entry of list) {
+    const hooks = ((entry && entry.hooks) || []).filter((h) => { const mine = String((h && h.command) || '').includes(HOOK_PATH); if (mine) removed++; return !mine; });
+    if (hooks.length) kept.push({ ...entry, hooks });
+  }
+  if (!removed) { say('this brain’s recall hook is not registered: nothing to remove'); process.exit(0); }
+  copyFileSync(SETTINGS, SETTINGS + '.before-havok-remove');
+  if (kept.length) settings.hooks.UserPromptSubmit = kept; else delete settings.hooks.UserPromptSubmit;
+  writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + NL, 'utf8');
+  say('removed the recall hook of ' + BRAIN + ' (a copy is in ' + SETTINGS + '.before-havok-remove). Restart the session.');
+  process.exit(0);
+}
+
 say('brain    : ' + BRAIN);
 say('settings : ' + SETTINGS + (existed ? '' : '  (does not exist yet)'));
 say('wired    : ' + (wiredHere ? 'YES, to this brain' : 'NO'));

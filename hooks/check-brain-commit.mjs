@@ -18,7 +18,7 @@
 // this hook is its backup through dispatch.mjs).
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import { COMMIT_CMD, VERIFY_MS, needsVerify, failedReason, HUNG_REASON } from './commitgate-rules.mjs';
@@ -61,6 +61,9 @@ try {
 
 // Only gate the brain repo. Any other repo is none of this hook business.
 if (!existsSync(join(BRAIN, 'REFLEX.md')) || !existsSync(join(BRAIN, 'memory'))) allow();
+// An engine copy with no memories (an export to package, 2026-11-09) is code, not a brain: an empty brain can never
+// pass the gate (no rules), and it is nobody's shared brain.
+if (!readdirSync(join(BRAIN, 'memory')).some((f) => f.endsWith('.md') && f !== 'MEMORY.md')) allow();
 
 // Only gate an actual commit.
 if (!COMMIT_CMD.test(cmd)) allow();
@@ -75,7 +78,10 @@ try {
 const { risky, verify } = needsVerify(staged);
 if (!verify) allow();
 
-const verifier = join(BRAIN, 'tools', 'verify.mjs');
+// What the commit will hold, not the disk (M2, 2026-11-09): verify-staged.mjs runs verify.mjs on an export of the
+// staged tree. A brain without it is verified on disk as before.
+const staged_ = join(BRAIN, 'tools', 'verify-staged.mjs');
+const verifier = existsSync(staged_) ? staged_ : join(BRAIN, 'tools', 'verify.mjs');
 if (!existsSync(verifier)) allow();
 
 const deny = (reason) => {

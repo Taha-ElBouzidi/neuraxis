@@ -27,8 +27,8 @@ Never start work without reading these. Never assume the structure from memory w
 
 ```sh
 # 1. Clone
-git clone https://github.com/Taha-ElBouzidi/infinite-context
-cd infinite-context
+git clone https://github.com/Taha-ElBouzidi/neuraxis
+cd neuraxis
 
 # 2. Initialise an empty brain and build its index
 node tools/init.mjs

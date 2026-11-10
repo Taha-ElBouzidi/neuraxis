@@ -295,4 +295,4 @@ say('Next, and it is the step that actually switches memory on:');
 say('  node tools/install-hook.mjs');
 say('');
 const vectors = existsSync(join(BRAIN, 'index', 'embeddings.json'));
-say('semantic recall  : ' + (vectors ? 'ON, the hook starts the embedder itself when it is not running' : 'OFF, keyword only. Run: npm install && node tools/build-index.mjs'));
+say('semantic recall  : ' + (vectors ? 'ON, the hook starts the embedder itself when it is not running' : 'OFF, keyword only; the reason is printed above (no model files: npm install; on Windows often the Visual C++ Redistributable). Then: node tools/build-index.mjs'));

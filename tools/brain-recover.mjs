@@ -4,8 +4,8 @@
 //
 // EVENTS, NOT A WATCHDOG (feedback_events_not_watchdogs). Nothing here runs on a timer. It is started by the failures
 // that already happen: the pre-turn hook marking the server down after a failed recall, brain-client getting no
-// answer, and the analyzer's existing /health probe (HavokBrainAnalytics, which already runs every 5 minutes for its
-// own report). Each calls reportFailure(), which does nothing off the brain host and starts one detached run here.
+// answer, and (until 2026-11-04) the analyzer's /health probe, whose 5-minute task was retired by hardening item 4: a
+// dead server is now noticed by the mod's outage probe on every machine, which tells HAVOK. Each calls reportFailure(), which does nothing off the brain host and starts one detached run here.
 //
 // ONE RUN: confirm with /health (PROBES tries, PROBE_GAP_MS apart; one answer means healthy and nothing is done),
 // check the hourly cap, restart through the normal start path (end the process that holds the port, then the same
@@ -79,7 +79,7 @@ export async function recover({ what, why, enabled, now, sleep, probe, restart, 
   const recent = (state.restarts[what] || []).filter((t) => now() - t < HOUR_MS);
   if (recent.length >= MAX_PER_HOUR) {
     const text = 'the ' + what + ' server failed /health ' + PROBES + ' times and was NOT restarted: already '
-      + recent.length + ' restarts in the last hour. A person or HAVOK must look at the cause. Last failure: ' + why;
+      + recent.length + ' restarts in the last hour. A person or the main agent must look at the cause. Last failure: ' + why;
     log({ at: new Date(now()).toISOString(), what, why, action: 'capped', restartsLastHour: recent.length, before });
     alert('recover-capped-' + what, text);
     state.restarts[what] = recent;

@@ -40,3 +40,4 @@ desktop.ini
 
 # the exporter writes this report into the export; it is for us, not for users
 REVIEW-BEFORE-PUBLISHING.md
+.server-alive.json

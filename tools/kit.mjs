@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { isPublicInstall } from './public-install.mjs';
 
 export const STATE_FILE = '.kit-state.json';
 export const WAIT_DIR = 'kit-updates';
@@ -270,7 +271,7 @@ export function kitStatus({ brain = SELF } = {}) {
 
 // ---- command line -----------------------------------------------------------------------------------
 function isInfiniteContext(brain) {
-  return readJson(join(brain, 'package.json'), {}).name === 'infinite-context';
+  return isPublicInstall(brain);
 }
 
 function rebuildIndex(brain) {
@@ -305,7 +306,7 @@ function main(argv) {
   }
   if (cmd === 'refresh') {
     if (!isInfiniteContext(SELF) && !flag('--anyway')) {
-      say('This brain is not an Infinite Context install (package.json does not name infinite-context), so its kit is');
+      say('This brain is not a Neuraxis install (package.json does not name neuraxis), so its kit is');
       say('authored here and its memory copies differ on purpose. Refreshing would offer every method as changed.');
       say('Run with --anyway to do it regardless.');
       process.exit(2);

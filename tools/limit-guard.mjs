@@ -30,3 +30,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url).toLowerCase() === process.
   if (why) { process.stdout.write(why + '\n'); process.exit(1); }
   process.exit(0);
 }
+
+// When the reserve opens again: the latest reset (ms) among the windows over the bar, or null when none is over it.
+// For a caller that waits on one timer to that instant instead of checking every minute (a message bridge's held replies,
+// 2026-11-05, timers to events).
+export function limitResetsAt(bar = BAR) {
+  const why = limitReached(bar);
+  if (!why) return null;
+  const at = [...why.matchAll(/resets (\S+?)(?:;|$)/g)].map((m) => Date.parse(m[1])).filter((t) => t > 0);
+  return at.length ? Math.max(...at) : null;
+}

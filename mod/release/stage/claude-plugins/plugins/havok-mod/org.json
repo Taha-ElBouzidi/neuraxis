@@ -1,0 +1,14 @@
+{
+  "home": "",
+  "mailLocal": "",
+  "mailRemote": "",
+  "reportTo": "",
+  "layerHost": "http://127.0.0.1:8478",
+  "brainDir": "",
+  "owner": "",
+  "mainAgent": "",
+  "reviewUrl": "",
+  "rename": {
+    "Neuraxis mod": "Neuraxis mod"
+  }
+}

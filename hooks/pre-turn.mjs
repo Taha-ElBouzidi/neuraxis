@@ -36,6 +36,8 @@ import { createHash } from 'node:crypto';
 import { terms as qterms } from '../tools/tokenize.mjs';
 import { CONTEXT_CHARS, contextMessage, prepareQueries, translateSync } from '../tools/recall-turn.mjs';
 import { reportFailure } from '../tools/brain-recover.mjs';
+// An install of the public repository, under its name or its old one (tools/public-install.mjs).
+const PUBLIC_NAME = /^(neuraxis|infinite-context)$/;
 import { execFileSync as execFileSyncRaw, spawn } from 'node:child_process';
 // THE HOOK'S OWN DEADLINE (HAVOK, 2026-11-03). On the locked-down client machine the brain was briefly unreachable over the office relay,
 // the hook ran past Claude Code's 10 s limit and was killed: the turn lost its rules and recall and nothing said so.
@@ -747,6 +749,31 @@ function ensureEmbedDaemon(brain) {
   } catch { /* best effort, keyword recall still works */ }
 }
 
+// THE LOCAL ENGINE SERVER (engine 0.4.90): an install that runs the full system for Claude Code (tools/setup-full.mjs)
+// sets brain.json "localServer": true. The server holds the context layers, the decision log and the answers the mod
+// asks for. It is started here, detached and hidden, when the process named in .server-alive.json is gone: no scheduled
+// task and no administrator rights. A start that finds the port taken exits at once. At most one try per 5 minutes.
+const SERVER_LOCK = resolve(homedir(), '.claude', 'havok-server-starting');
+function ensureLocalServer(brain) {
+  try {
+    let cfg = {};
+    try { cfg = JSON.parse(readFileSync(join(brain, 'brain.json'), 'utf8')); } catch { return; }
+    if (cfg.localServer !== true || !existsSync(join(brain, 'tools', 'brain-server.mjs'))) return;
+    try {
+      const alive = JSON.parse(readFileSync(join(brain, '.server-alive.json'), 'utf8'));
+      if (alive && Number.isInteger(alive.pid) && alive.pid > 0) { process.kill(alive.pid, 0); return; }
+    } catch { /* no marker, or the process is gone: start one */ }
+    try {
+      const age = Date.now() - Number(readFileSync(SERVER_LOCK, 'utf8').trim());
+      if (age >= 0 && age < 5 * 60 * 1000) return;
+    } catch { /* no lock */ }
+    writeFileSync(SERVER_LOCK, String(Date.now()), 'utf8');
+    const env = { ...process.env, HAVOK_LAYERS_DIR: process.env.HAVOK_LAYERS_DIR || join(brain, 'layers') };
+    const child = spawn(process.execPath, [join(brain, 'tools', 'brain-server.mjs')], { detached: true, stdio: 'ignore', cwd: brain, windowsHide: true, env });
+    child.unref();
+  } catch { /* best effort: recall here does not need the server */ }
+}
+
 function fetchVectorSync(text, brain) {
   // Local daemon first: it is on loopback and answers in milliseconds. Only fall out to the
   // network when this machine is not running one.
@@ -894,6 +921,7 @@ try {
   // from the first. Found on 2026-09-05 by cloning the export on the author's own machine.
   const BRAIN = [process.env.HAVOK_BRAIN, HERE, marker].find(isBrain) || HERE;
   RECOVER_BRAIN = BRAIN;
+  ensureLocalServer(BRAIN);
 
   let raw = '';
   try { raw = readFileSync(0, 'utf8'); } catch { /* no stdin */ }
@@ -1032,7 +1060,7 @@ try {
     let cfg = {};
     try { cfg = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8')); } catch { /* no settings file */ }
     let pub = false;
-    try { pub = JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name === 'infinite-context'; } catch { /* not an install */ }
+    try { pub = PUBLIC_NAME.test(JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name); } catch { /* not an install */ }
     const line = planLine(planOf(cfg, pub));
     if (line) out.push('', line);
   } catch { /* the plan line is a help, never a reason to lose the turn */ }
@@ -1368,7 +1396,7 @@ try {
      owner's own brain never runs it. tools/update.mjs returns the last result worth telling, once, and starts a check
      in the background when the last one is a day old; this turn never waits for it. */
   try {
-    if (!systemEvent && JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name === 'infinite-context') {
+    if (!systemEvent && PUBLIC_NAME.test(JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name)) {
       const { updateNotice } = await import('../tools/update.mjs');
       const note = updateNotice(BRAIN);
       if (note) out.push('', note);

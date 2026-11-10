@@ -249,7 +249,7 @@ if (cmd === 'status') {
         : 'cannot be read: the server did not answer /vault/list') + NL);
     if (readable > 0) {
       process.stdout.write('  note: vault.json still lists a local key for ' + me + '. Keys are meant to live only on'
-        + ' SERVER, so that is stale, pull the brain.' + NL);
+        + ' the brain server, so that is stale, pull the brain.' + NL);
     }
   }
 
@@ -358,6 +358,44 @@ const fs_hasMemories = (d) => { try { return readdirSync(d).some((n) => n.endsWi
     process.stdout.write(execFileSync(process.execPath, [join(BRAIN, 'tools', 'vault.mjs'), 'list'], { encoding: 'utf8' }));
   }
 
+} else if (cmd === 'decision') {
+  // node tools/brain-client.mjs decision review <id> kept|reversed "<note>"   (The owner, 2026-11-09: HAVOK reviews the other
+  // agents' decisions). The agent is HAVOK_MOD_AGENT, the name its launcher gives it; the server checks it is allowed.
+  const [, sub, id, state, ...rest] = process.argv.slice(2);
+  const agent = String(process.env.HAVOK_MOD_AGENT || '').trim();
+  if (sub !== 'review' || !id || !['kept', 'reversed'].includes(state)) {
+    process.stderr.write('usage: node tools/brain-client.mjs decision review <id> kept|reversed "<note>"' + NL);
+    process.exit(2);
+  }
+  if (!agent) { process.stderr.write('HAVOK_MOD_AGENT is not set: run this from the agent\'s own session.' + NL); process.exit(2); }
+  const r = call('/decisions/' + encodeURIComponent(id) + '/review', { method: 'POST', body: { state, note: rest.join(' '), agent } });
+  if (!r) process.exit(1);
+  if (r.error) { process.stderr.write(r.error + NL); process.exit(1); }
+  process.stdout.write('reviewed ' + id + ': ' + state + (r.message ? (r.message.sent ? ', the agent is told' : ', the agent could not be told: ' + r.message.why) : '') + NL);
+} else if (cmd === 'agy-quota') {
+  // One Gemini quota reading for every machine (tools/agy-quota-store.mjs; The owner, 2026-11-09):
+  //   node tools/brain-client.mjs agy-quota push <quota.json>   send this machine's reading (agy-run does it after a run)
+  //   node tools/brain-client.mjs agy-quota pull <quota.json>   write the shared reading there when it is newer
+  // Never fails a run: a problem is one line on stderr and exit 1.
+  const [, sub, file] = process.argv.slice(2);
+  if (!['push', 'pull'].includes(sub) || !file) {
+    process.stderr.write('usage: node tools/brain-client.mjs agy-quota push|pull <quota.json>' + NL);
+    process.exit(2);
+  }
+  const local = (() => { try { return JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } })();
+  if (sub === 'push') {
+    if (!local) { process.stderr.write('no reading in ' + file + NL); process.exit(1); }
+    const r = call('/agy/quota', { method: 'POST', body: local, timeoutSec: 15 });
+    if (!r || r.error) { process.stderr.write('agy quota not sent: ' + ((r && r.error) || 'no answer') + NL); process.exit(1); }
+    process.stdout.write((r.kept ? 'sent, now the shared reading: ' : 'a newer reading stands: ') + r.at + NL);
+  } else {
+    const r = call('/agy/quota', { timeoutSec: 15 });
+    if (!r || r.error || !r.at) { process.stderr.write('no shared agy quota reading: ' + ((r && r.error) || 'no answer') + NL); process.exit(1); }
+    if (local && Date.parse(local.at) >= Date.parse(r.at)) { process.stdout.write('this machine has the newest reading: ' + local.at + NL); process.exit(0); }
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(r, null, 2) + NL, 'utf8');
+    process.stdout.write('took the shared reading from ' + (r.machine || 'another machine') + ', ' + r.at + NL);
+  }
 } else if (cmd === 'secret') {
   if (!arg) { process.stderr.write('usage: brain-client.mjs secret <name>\n'); process.exit(1); }
   let r = call('/vault/get/' + encodeURIComponent(arg));
@@ -534,6 +572,12 @@ const fs_hasMemories = (d) => { try { return readdirSync(d).some((n) => n.endsWi
   // one (tools/brain-client-help.test.mjs). Same arguments: list, url, clone, pull, push.
   const r = spawnSync(process.execPath, [REPO_TOOL, ...process.argv.slice(3)], { stdio: 'inherit', windowsHide: true });
   process.exit(r.status == null ? 1 : r.status);
+
+} else if (cmd === 'wa') {
+  // the chat assistant's WhatsApp lines for any agent on any machine (The owner, 2026-11-04): tools/wa-client.mjs.
+  const { runWa } = await import('./wa-client.mjs').catch(() => ({ runWa: null }));
+  if (!runWa) { process.stderr.write('the WhatsApp tool is not part of this install' + NL); process.exit(2); }
+  process.exitCode = runWa(process.argv.slice(3));
 
 } else if (cmd === 'read') {
   // FETCH ONE MEMORY FROM THE the host, for a machine that holds no copy of memory/.

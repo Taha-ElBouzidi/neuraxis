@@ -23,7 +23,7 @@
 // every tie (equal modularity gain, equal edge weight) is broken by the lower id, never by
 // insertion order or Math.random.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 
@@ -270,6 +270,9 @@ function topicName(members, descriptions) {
 }
 
 function main() {
+  // A keyword-only brain (init --no-semantic) has no vectors: no topics to group, and that is not a failure (a machine without AVX,
+  // 2026-11-04: build-index stopped here with ENOENT).
+  if (!existsSync(join(IDX, 'embeddings.json'))) { console.log('topics skipped: keyword-only brain (no index/embeddings.json)'); return; }
   const emb = loadJSON(join(IDX, 'embeddings.json'));
   const kw = loadJSON(join(IDX, 'keywords.json'));
   const descriptions = kw.descriptions;

@@ -1,0 +1,13 @@
+{
+  "name": "havok-org",
+  "owner": {
+    "name": "Neuraxis"
+  },
+  "plugins": [
+    {
+      "name": "havok-mod",
+      "source": "./plugins/havok-mod",
+      "description": "The Neuraxis mod, installed as the organization's own: context, mailbox, keep-warm, usage, checks."
+    }
+  ]
+}

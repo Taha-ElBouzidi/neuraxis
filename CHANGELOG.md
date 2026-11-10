@@ -1,6 +1,44 @@
 # Changelog
 
-Infinite Context, infinite context for your AI model.
+Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI assistant.
+
+## 0.4.107
+
+The product is now called Neuraxis; it was Infinite Context. Your install updates across the rename and keeps your
+memories, kit, plan and settings. Nothing here touches your memories.
+
+- **Paste the link, and your assistant does the rest.** The README now starts with a block for the AI agent that
+  reads it: read everything, then run the install as a conversation. `AGENTS.md` is rewritten as a map of every part
+  of the repository, seven questions to ask you before installing anything, the steps with a check each, and a
+  twelve-item checklist the agent goes through before saying the install is done.
+- **The full system for Claude Code on Windows.** `node tools/setup-full.mjs` adds the context layers (the rules every
+  session reads, written with you), the context clean-up (a long conversation stays small), keep-warm and the
+  decision log. It runs a small server on your computer (127.0.0.1 only) and installs the mod in `mod/`, which needs a
+  Windows administrator once and changes settings for every user of the computer, so it installs only with `--yes`
+  after you agree (`node tools/setup-full.mjs --mod --yes`); `--help` or any unknown option only prints the usage.
+  Other assistants and systems keep memory and recall.
+- **The decision log.** Decisions your assistant takes for you are kept with the reason; you review them on a page on
+  your own computer (`node tools/decision-review.mjs link`), kept or reversed, and the assistant reads your note.
+- **The map is the topic map.** `node tools/dashboard.mjs --open` (same command, same port 8492) now shows your
+  memories grouped by topic, from `index/topics.json`, and replaces the old dashboard and its four bands. It updates
+  itself the moment a memory or the topics change. Without the meaning model (a keyword-only install) it groups by
+  kind and says in one line how to get topics. Your `dashboard/config.json` is kept: `name`, `tagline`, `colors` and
+  `links` still apply; `regions` and `showMachines` are ignored. `node tools/map-sample.mjs <folder>` writes a small
+  invented brain to try it on.
+- **A requirements section and a plain guide.** `docs/GUIDE.md` explains it in plain words, `docs/TUTORIAL.md` has
+  five things to try in ten minutes, and `node tools/install-hook.mjs --remove` takes the recall hook out.
+- **More than one assistant.** A new kit method, `reference_how_to_create_an_agent`, teaches your assistant when a
+  helper is enough and how to set up a second named assistant with its own context (`setup-full.mjs --agent <name>
+  --another`), and your assistant now tells you that you can have several. The helper method now defines a branch
+  helper, a fork helper, a branch, a fork and a standing agent, and says when to use which (helpers that share the
+  conversation measured about 58 percent cheaper over material already read).
+- **Keyword recall when the meaning model cannot run.** On a Windows computer without the Microsoft Visual C++
+  Redistributable (x64), the meaning model does not load. Setup no longer stops there: recall works by keyword, and
+  it says what to install (with Microsoft's link) and to run `node tools/build-index.mjs` afterwards.
+- **What is tested where.** Windows is tested. macOS and Linux are not tested: memory and recall are plain Node and
+  git and are written to run there; the full system is Windows only. The README says so per system.
+- **Tests on every change:** the repository runs its tests on Windows, Linux and macOS and a secret scan on each push
+  and pull request; Windows must pass, Linux and macOS report their result.
 
 ## 0.4.89
 

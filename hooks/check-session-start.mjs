@@ -276,7 +276,8 @@ try {
     const probe = runIn(BRAIN, 'curl -s --connect-timeout 1 --max-time 2 ' + certArg + ' https://127.0.0.1:8443/health', 4000);
     const up = probe.ok && probe.out.includes('"ok"');
     if (!up) {
-      const child = spawn(process.execPath, [server], { detached: true, stdio: 'ignore', cwd: BRAIN });
+      // --public as the scheduled task starts it: a copy without it would also serve plaintext beside the real one.
+      const child = spawn(process.execPath, [server, '--public'], { detached: true, stdio: 'ignore', cwd: BRAIN, windowsHide: true });
       child.unref();
       notes.push('Started the brain server on port 8443 (TLS). It serves recall, the vault and embeddings to every machine on the tailnet; they reach it with tools/brain-client.mjs.');
     }

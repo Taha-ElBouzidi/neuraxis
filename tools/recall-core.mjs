@@ -108,12 +108,16 @@ export function makeRecall({ brain, getEmbedder, indexVersion }) {
     });
   }
   async function buildSnapshot(v) {
-    const [kwRaw, embRaw] = await Promise.all([
-      readFile(join(BRAIN, 'index', 'keywords.json'), 'utf8'),
-      readFile(join(BRAIN, 'index', 'embeddings.json'), 'utf8'),
-    ]);
-    const kw = JSON.parse(kwRaw);
-    const emb = JSON.parse(embRaw);
+    // NO EMBEDDINGS INDEX (2026-11-09: a brain whose machine cannot build vectors, a machine without AVX with no AVX): recall
+    // answers from the keyword index alone and says why, instead of failing every request.
+    const kw = JSON.parse(await readFile(join(BRAIN, 'index', 'keywords.json'), 'utf8'));
+    let emb;
+    try {
+      emb = JSON.parse(await readFile(join(BRAIN, 'index', 'embeddings.json'), 'utf8'));
+      if (!Array.isArray(emb.slugs) || !Array.isArray(emb.vectors)) throw new Error('embeddings.json has no slugs or vectors');
+    } catch (e) {
+      emb = { slugs: [], vectors: [], missing: 'there is no usable embeddings index (' + String((e && e.code) || (e && e.message) || e).slice(0, 80) + ')' };
+    }
     let parts;
     try { parts = await graphInWorker(emb); }
     catch (e) {
@@ -226,6 +230,7 @@ export function makeRecall({ brain, getEmbedder, indexVersion }) {
     let vectors = [];
     let degraded = '';
     try {
+      if (!emb.slugs.length) throw new Error(emb.missing || 'there is no embeddings index');
       const e = await getEmbedder();
       const t0 = Date.now();
       for (let qi = 0; qi < queries.length; qi++) {

@@ -10,6 +10,9 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+// The vault commits each change in the background (tools/commit-paths.mjs); in a throwaway folder that process held
+// the folder open and the clean-up failed (EPERM). The server's own commit is what this file tests.
+process.env.HAVOK_VAULT_NO_COMMIT = '1';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -17,6 +20,7 @@ function sandbox(machines) {
   const root = mkdtempSync(join(tmpdir(), 'vault-write-'));
   mkdirSync(join(root, 'tools'));
   copyFileSync(join(HERE, 'vault.mjs'), join(root, 'tools', 'vault.mjs'));
+  for (const f of ['commit-paths.mjs', 'brain-git-lock.mjs']) copyFileSync(join(HERE, f), join(root, 'tools', f));
   const home = join(root, 'home');
   mkdirSync(home);
   const reg = { version: 1, machines: {} };

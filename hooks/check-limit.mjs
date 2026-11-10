@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { BYPASS_MS, reserveOf, accountOf, agentExempt, claudeFiles, hitsOf, typedUrgent, isPing, typedRow, urgentStillOpen, blockMessage, TOOL_STOP, PING_BLOCKED, blockKind, blockRow, bypassName, BYPASS_OUTBOX, BYPASS_REASON, bypassUseRow, BYPASS_MARKER, bypassMarkerAfter } from './limit-rules.mjs';
+import { BYPASS_MS, reserveOf, accountOf, agentExempt, claudeFiles, hitsOf, typedUrgent, relayedUrgent, isPing, typedRow, urgentStillOpen, blockMessage, TOOL_STOP, PING_BLOCKED, blockKind, blockRow, bypassName, BYPASS_OUTBOX, BYPASS_REASON, bypassUseRow, BYPASS_MARKER, bypassMarkerAfter } from './limit-rules.mjs';
 
 const HOME = join(homedir(), '.claude');
 const BYPASS_DIR = join(HOME, 'havok-limit-bypass');
@@ -30,7 +30,7 @@ const reserve = reserveOf(parse(read(join(dirname(dirname(fileURLToPath(import.m
 if (!reserve.enabled) process.exit(0);
 const { five, week, hits } = hitsOf(parse(read(files.limits)), Date.now());
 
-const typed = typedUrgent(data);
+const typed = typedUrgent(data) || relayedUrgent(data, reserve.mainAgent, reserve.relays);
 const bypassFile = join(BYPASS_DIR, bypassName(session));
 const openBypass = (until) => { try { mkdirSync(BYPASS_DIR, { recursive: true }); writeFileSync(bypassFile, String(until)); } catch { /* still let it through */ } };
 // Recorded below the bar too: "urgent" typed at 96 percent was lost, and the same session was blocked minutes later.
@@ -90,7 +90,7 @@ if (data.hook_event_name === 'PreToolUse' && data.transcript_path) {
   if (urgentStillOpen(last, Date.now())) { openBypass(last.at + BYPASS_MS); through(bypassFileName, BYPASS_REASON.urgent); }
 }
 
-const msg = blockMessage(hits, reserve.mainAgent);
+const msg = blockMessage(hits, reserve.mainName || reserve.mainAgent);
 logBlock(blockKind(data.hook_event_name, data.tool_name));
 if (data.hook_event_name === 'UserPromptSubmit') {
   process.stdout.write(JSON.stringify({ decision: 'block', reason: msg }));

@@ -27,7 +27,7 @@ function runSave({ name, origin, repository, backup, ignore = '' }) {
     git('config', 'user.email', 'save@test.invalid');
     git('config', 'user.name', 'save test');
     for (const d of ['tools', 'memory', 'index', 'provenance']) mkdirSync(join(repo, d));
-    for (const m of ['save-brain.mjs', 'brain-git-lock.mjs']) copyFileSync(join(HERE, m), join(repo, 'tools', m));
+    for (const m of ['save-brain.mjs', 'brain-git-lock.mjs', 'public-install.mjs']) copyFileSync(join(HERE, m), join(repo, 'tools', m));
     writeFileSync(join(repo, 'tools', 'build-index.mjs'), 'process.exit(0);\n');
     writeFileSync(join(repo, 'tools', 'reflect.mjs'), 'console.log("Total findings: 0");\n');
     writeFileSync(join(repo, 'index', 'k.json'), '{}\n');
@@ -80,7 +80,7 @@ test('an install pushes to the backup remote named in brain.json, by address', (
 test('a backup remote that is the public repository is refused, however it is spelled', () => {
   const r = runSave({ name: 'infinite-context', origin: 'mine', repository: (x) => 'git+' + x.upstream + '/', backup: (x) => x.upstream });
   assert.doesNotMatch(r.upstream, /probe save/, 'the memory commit reached the public repository');
-  assert.match(r.log, /committed, not pushed: the backup remote is the public Infinite Context repository/, r.log);
+  assert.match(r.log, /committed, not pushed: the backup remote is the public Neuraxis repository/, r.log);
 });
 
 test('an install with no remote at all commits and says so in one line', () => {

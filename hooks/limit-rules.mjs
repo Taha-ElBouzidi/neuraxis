@@ -33,6 +33,28 @@ export function isTyped(data) {
 
 export const typedUrgent = (data) => URGENT.test(promptOf(data)) && isTyped(data);
 
+// HAVOK RELAYS THE OWNER'S "urgent" (the owner via HAVOK, 2026-11-05): a message the mod delivers as a prompt (not typed) from the
+// main agent (reserve.mainAgent, "havok") whose text starts with "urgent" opens the session as the owner's own "urgent" does,
+// so HAVOK can start an agent for him while the reserve holds. The frame is the mod's own: a header line
+// "AGENT MESSAGE: <address>, <time> (id <id>)" then a fenced body; a body line that starts like a header is quoted by
+// the mod, so a message cannot forge one. Only a relay's own address counts (lead@<machine>, not lead-dev@...).
+// The relays: this subscription's reserve keeper, and the agents brain.json "urgentRelays" names (reserveOf gives them
+// as reserve.relays): the agent the owner talks to relays for them even on another account's login, where the keeper
+// is that account's agent (2026-11-05). An install that names none has only the keeper.
+const RELAY_HEAD = /^AGENT MESSAGE: ([^\s,]+), [^\n]*\n<<<msg-[A-Za-z0-9]+\r?\n([^\n]*)/gm;
+export function isUrgentRelay(address, mainAgent, extra = []) {
+  const from = String(address || '').trim().toLowerCase();
+  const relays = [String(mainAgent || '').trim().toLowerCase(), ...(Array.isArray(extra) ? extra : []).map((r) => String(r).trim().toLowerCase())].filter(Boolean);
+  return relays.some((r) => from === r || from.startsWith(r + '@'));
+}
+export function relayedUrgent(data, mainAgent, extra = []) {
+  if (isTyped(data)) return false;
+  for (const m of promptOf(data).matchAll(RELAY_HEAD)) {
+    if (isUrgentRelay(m[1], mainAgent, extra) && URGENT.test(m[2])) return true;
+  }
+  return false;
+}
+
 export const isPing = (data) => promptOf(data).trim() === KEEP_WARM_PROMPT;
 
 // A transcript row a person typed: { text, at }, or null. Only entries a person typed (origin.kind "human", or no
@@ -65,7 +87,14 @@ export function reserveOf(brainConfig, accountEmail) {
   const accounts = (brainConfig && brainConfig.limitReserve && brainConfig.limitReserve.accounts) || {};
   const key = Object.keys(accounts).find((k) => k.trim().toLowerCase() === String(accountEmail || '').trim().toLowerCase());
   const v = key === undefined ? '' : accounts[key];
-  return { enabled: v !== false, mainAgent: typeof v === 'string' ? v.trim().toLowerCase() : '' };
+  const mainAgent = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  // The name a person reads in the notice (The owner, 2026-11-09: "the rest is reserved for HAVOK"): limitReserve.names
+  // maps an agent to it; an agent without one is named as it is.
+  const names = (brainConfig && brainConfig.limitReserve && brainConfig.limitReserve.names) || {};
+  const nameKey = Object.keys(names).find((k) => k.trim().toLowerCase() === mainAgent);
+  const mainName = mainAgent ? String((nameKey !== undefined && names[nameKey]) || mainAgent).trim() : '';
+  const relays = (Array.isArray(brainConfig && brainConfig.urgentRelays) ? brainConfig.urgentRelays : []).map((r) => String(r).trim().toLowerCase()).filter(Boolean);
+  return { enabled: v !== false, mainAgent, mainName, relays };
 }
 
 // Where Claude Code keeps the account file and where the status line writes its readings: inside CLAUDE_CONFIG_DIR
@@ -93,10 +122,11 @@ export const startedFromSession = (env) => String((env && env[SESSION_SHELL_VAR]
 // The agent exemption, from the environment: the agent the launcher named, unless it was only inherited.
 export const agentExempt = (env, reserve) => !startedFromSession(env) && isMainAgent(env && env.HAVOK_MOD_AGENT, reserve);
 
-export function blockMessage(hits, mainAgent = '') {
+// mainName: the subscription's main agent as a person reads it (reserve.mainName).
+export function blockMessage(hits, mainName = '') {
   const when = (w) => (w.resets_at ? new Date(w.resets_at * 1000).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : 'unknown');
   return hits.map(([name, w]) => name + ' limit at ' + Math.round(w.used_percentage) + '%, resets ' + when(w)).join('; ')
-    + '. The rest is kept for ' + (mainAgent || 'the main assistant') + '. Start your message with "urgent" to open this session for 2 hours.';
+    + '. The rest is reserved for ' + (mainName || 'the main agent') + '. Start your message with "urgent" to open this session for 2 hours.';
 }
 
 export const TOOL_STOP = ' Stop working now: write where you stopped so the work can resume after the reset, and end your turn.';

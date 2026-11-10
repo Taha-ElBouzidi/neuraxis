@@ -176,5 +176,5 @@ const reserveOfText = (text) => { try { return JSON.stringify(sorted(JSON.parse(
 export const reserveChanged = (headText, stagedText) => reserveOfText(headText) !== reserveOfText(stagedText);
 
 export const RESERVE_REFUSAL = 'Commit refused: it changes limitReserve in brain.json, which decides who may use the last '
-  + '5 percent of a Claude subscription. This check stops a mistake; the change needs the owner\'s yes through HAVOK. With it, '
+  + '5 percent of a Claude subscription. This check stops a mistake; the change needs the owner\'s yes through the main agent. With it,'
   + 'add a line to the message: ' + RESERVE_TRAILER + ': <YYYY-MM-DD> <his words>.';

@@ -120,14 +120,30 @@ before(async () => {
   root = mkdtempSync(join(tmpdir(), 'recall-turn-e2e-'));
   home = join(root, 'home');
   mkdirSync(join(home, '.claude'), { recursive: true });
-  for (const d of ['hooks', 'tools', 'index', 'memory']) cpSync(join(BRAIN, d), join(root, d), { recursive: true, filter: (s) => !/node_modules|[\\/]\.git[\\/]?$/.test(s) });
+  for (const d of ['hooks', 'tools', 'index', 'memory']) if (existsSync(join(BRAIN, d))) cpSync(join(BRAIN, d), join(root, d), { recursive: true, filter: (s) => !/node_modules|[\\/]\.git[\\/]?$/.test(s) });
+  // A fresh copy of the engine has no memories yet: a few written for the test, so the comparison has something to find.
+  if (!existsSync(join(BRAIN, 'index'))) {
+    mkdirSync(join(root, 'memory'), { recursive: true });
+    const facts = [
+      ['reference_brain_server_recall', 'how the brain server answers a recall request, keyword and meaning', 'The server ranks memories by keyword and by meaning. Related: [[reference_index_build]].'],
+      ['reference_index_build', 'how the index and the embeddings are built after a memory is saved', 'build-index.mjs rebuilds the keywords and the vectors. Related: [[reference_brain_server_recall]].'],
+      ['feedback_writing_a_memory', 'the rule for writing a new memory and replacing a wrong one', 'One fact per file, checked first, replaced when wrong. Related: [[reference_index_build]].'],
+      ['reference_connect_a_machine', 'how to connect a second machine to the brain server and which token it needs', 'connect-machine.mjs writes the endpoint and the token. Related: [[reference_brain_server_recall]].'],
+      ['reference_commit_gate', 'what the commit gate and verify check before a push', 'verify.mjs parses hooks and tools and checks the index. Related: [[feedback_writing_a_memory]].'],
+    ];
+    for (const [slug, desc, body] of facts) {
+      const type = slug.split('_')[0];
+      writeFileSync(join(root, 'memory', slug + '.md'), `---\nname: ${slug}\ndescription: ${desc}\ntype: ${type}\nmetadata:\n  type: ${type}\n  asserted: 2026-11-09\n---\n${body}\n`);
+    }
+  }
   const ROOT_FILES = ['REFLEX.md', 'brain.json'];
   for (const f of ROOT_FILES) if (existsSync(join(BRAIN, f))) cpSync(join(BRAIN, f), join(root, f));
   if (existsSync(join(BRAIN, 'node_modules'))) execFileSync('cmd', ['/c', 'mklink', '/J', join(root, 'node_modules'), join(BRAIN, 'node_modules')], { windowsHide: true, stdio: 'ignore' });
+  if (!existsSync(join(root, 'index'))) execFileSync(process.execPath, [join(root, 'tools', 'build-index.mjs')], { cwd: root, windowsHide: true, stdio: 'ignore', timeout: 300000 });
   port = await freePort();
   writeFileSync(join(root, 'server-endpoint.json'), JSON.stringify({ url: 'http://127.0.0.1:' + port }));
   child = spawn(process.execPath, [join(root, 'tools', 'brain-server.mjs'), '--allow-plaintext'], {
-    env: { ...process.env, HAVOK_HOME: home, HAVOK_SERVER_PORT: String(port), HAVOK_LAYERS_DIR: join(root, 'LAYERS') }, windowsHide: true, stdio: 'ignore',
+    env: { ...process.env, HAVOK_HOME: home, HAVOK_SERVER_PORT: String(port), HAVOK_DECISIONS_PORT: '0', HAVOK_LAYERS_DIR: join(root, 'LAYERS') }, windowsHide: true, stdio: 'ignore',
   });
   for (let i = 0; i < 200 && !existsSync(join(home, 'havok-server-token')); i += 1) await sleep(100);
   token = readFileSync(join(home, 'havok-server-token'), 'utf8').trim();
@@ -153,8 +169,10 @@ function hookSlugs(prompt, previous) {
   return slugs;
 }
 
-test('POST /recall/turn finds the same memories as hooks/pre-turn.mjs on the example prompts', { timeout: 600000 }, async () => {
-  const { cases } = JSON.parse(readFileSync(join(HERE, 'recall-turn-prompts.example.json'), 'utf8'));
+// The owner's real prompts stay in the owner's instance; a public copy of the engine has synthetic ones (2026-11-09).
+const PROMPTS = existsSync(join(HERE, 'recall-turn-prompts.json')) ? 'recall-turn-prompts.json' : 'recall-turn-prompts.example.json';
+test('POST /recall/turn finds the same memories as hooks/pre-turn.mjs on 30 prompts', { timeout: 600000 }, async () => {
+  const { cases } = JSON.parse(readFileSync(join(HERE, PROMPTS), 'utf8'));
   assert.equal(cases.length, 30);
   for (const c of cases) {
     const old = hookSlugs(c.prompt, c.previous);
