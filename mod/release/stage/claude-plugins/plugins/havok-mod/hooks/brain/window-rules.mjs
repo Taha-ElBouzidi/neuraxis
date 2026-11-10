@@ -63,8 +63,13 @@ function scan(text, lang) {
     let raw = '', mask = '', skel = '', flat = '';
     const put = (c, m = c, s = c) => { raw += c; mask += m; skel += s; flat += m; };
     const sep = (c) => { flat += c; };
-    const flush = (detached) => { if (raw.trim())
-        stmts.push({ raw, mask, skel, detached: !!detached }); raw = ''; mask = ''; skel = ''; };
+    const flush = (detached) => {
+        if (raw.trim())
+            stmts.push({ raw, mask, skel, detached: !!detached });
+        raw = '';
+        mask = '';
+        skel = '';
+    };
     const n = text.length;
     let i = 0;
     while (i < n) {
@@ -193,8 +198,14 @@ function scan(text, lang) {
 }
 function headOf(st, lang) {
     let s = st.mask, off = 0, called = false, assigned = false;
-    const strip = (re) => { const m = re.exec(s); if (!m || !m[0])
-        return false; s = s.slice(m[0].length); off += m[0].length; return true; };
+    const strip = (re) => {
+        const m = re.exec(s);
+        if (!m || !m[0])
+            return false;
+        s = s.slice(m[0].length);
+        off += m[0].length;
+        return true;
+    };
     strip(/^\s+/);
     for (let guard = 0; guard < 12; guard++) {
         if (strip(/^[$@]?\(+\s*/))
@@ -278,8 +289,10 @@ function statementProblems(st, lang, run) {
     const restRaw = st.raw.slice(h.at);
     const launcher = launcherIn(st.raw) && (VEHICLES.has(b) || LAUNCHERS.some((l) => b === noExe(l) || baseName(h.name) === l));
     const where = st.raw.trim().replace(/\s+/g, ' ').slice(0, 90);
-    const add = (what, fix) => { if (!launcher)
-        out.push({ kind: 'window', what, fix, where }); };
+    const add = (what, fix) => {
+        if (!launcher)
+            out.push({ kind: 'window', what, fix, where });
+    };
     const isStartProcess = b === 'start-process' || b === 'saps' || (b === 'start' && lang !== 'sh');
     if (isStartProcess && lang !== 'cmd') {
         const target = baseName(startProcessTarget(st, h));
@@ -470,8 +483,13 @@ export function windowProblems(tool, input) {
     problems.push(...intervalProblems(levels, input || {}));
     problems.push(...taskProblems(levels, full));
     const seen = new Set();
-    return problems.filter((p) => { const k = p.kind + '|' + p.what; if (seen.has(k))
-        return false; seen.add(k); return true; });
+    return problems.filter((p) => {
+        const k = p.kind + '|' + p.what;
+        if (seen.has(k))
+            return false;
+        seen.add(k);
+        return true;
+    });
 }
 export function windowDenyReason(problems) {
     const win = problems.filter((p) => p.kind === 'window');

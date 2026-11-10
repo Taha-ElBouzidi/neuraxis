@@ -1,5 +1,3 @@
-// tools/commit-paths.mjs: commits and pushes only the named paths (2026-11-05, the nightly HavokBrainSync task removed).
-// Runs on a throwaway repository with a throwaway bare remote. Run: node --test tools/commit-paths.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
@@ -7,51 +5,47 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-
 const HERE = dirname(fileURLToPath(import.meta.url));
 const git = (cwd, ...a) => execFileSync('git', ['-C', cwd, ...a], { encoding: 'utf8', windowsHide: true }).trim();
-
 test('only the named path is committed and pushed; another changed file stays as it is; nothing changed commits nothing', () => {
-  const root = mkdtempSync(join(tmpdir(), 'commit-paths-'));
-  const remote = join(root, 'remote.git');
-  const brain = join(root, 'brain');
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'master', remote]);
-  mkdirSync(join(brain, 'tools'), { recursive: true });
-  git(root, 'init', '-q', '-b', 'master', brain);
-  git(brain, 'config', 'user.email', 't@example.com');
-  git(brain, 'config', 'user.name', 't');
-  git(brain, 'config', 'core.hooksPath', join(root, 'no-hooks'));
-  for (const f of ['commit-paths.mjs', 'brain-git-lock.mjs']) copyFileSync(join(HERE, f), join(brain, 'tools', f));
-  writeFileSync(join(brain, 'vault.json'), '{}\n');
-  writeFileSync(join(brain, 'work.txt'), 'a\n');
-  git(brain, 'add', '-A');
-  git(brain, 'commit', '-q', '-m', 'start');
-  git(brain, 'remote', 'add', 'origin', remote);
-  git(brain, 'push', '-q', '-u', 'origin', 'master');
-
-  writeFileSync(join(brain, 'vault.json'), '{"x":1}\n');
-  writeFileSync(join(brain, 'work.txt'), 'half done\n');
-  const run = () => execFileSync(process.execPath, [join(brain, 'tools', 'commit-paths.mjs'), 'vault: x stored', 'vault.json'], { encoding: 'utf8', windowsHide: true }).trim();
-  assert.equal(run(), 'committed and pushed');
-  assert.equal(git(remote, 'log', '-1', '--format=%s'), 'vault: x stored');
-  assert.equal(git(remote, 'show', 'HEAD:vault.json'), '{"x":1}');
-  assert.match(git(brain, 'status', '--porcelain'), /work\.txt/, 'the other file is left uncommitted');
-  assert.equal(run(), 'nothing to commit');
-
-  // Another machine pushed in between: the push is refused, the tool takes the remote's commit and pushes again.
-  const other = join(root, 'other');
-  execFileSync('git', ['clone', '-q', remote, other]);
-  git(other, 'config', 'user.email', 'o@example.com');
-  git(other, 'config', 'user.name', 'o');
-  git(other, 'config', 'core.hooksPath', join(root, 'no-hooks'));
-  writeFileSync(join(other, 'other.txt'), 'from another machine' + String.fromCharCode(10));
-  git(other, 'add', 'other.txt');
-  git(other, 'commit', '-q', '-m', 'other machine');
-  git(other, 'push', '-q', 'origin', 'master');
-  writeFileSync(join(brain, 'vault.json'), '{"x":2}' + String.fromCharCode(10));
-  const third = execFileSync(process.execPath, [join(brain, 'tools', 'commit-paths.mjs'), 'vault: x again', 'vault.json'], { encoding: 'utf8', windowsHide: true }).trim();
-  assert.equal(third, 'committed and pushed');
-  assert.equal(git(remote, 'show', 'HEAD:vault.json'), '{"x":2}');
-  assert.equal(git(remote, 'show', 'HEAD:other.txt'), 'from another machine');
-  rmSync(root, { recursive: true, force: true });
+    const root = mkdtempSync(join(tmpdir(), 'commit-paths-'));
+    const remote = join(root, 'remote.git');
+    const brain = join(root, 'brain');
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'master', remote]);
+    mkdirSync(join(brain, 'tools'), { recursive: true });
+    git(root, 'init', '-q', '-b', 'master', brain);
+    git(brain, 'config', 'user.email', 't@example.com');
+    git(brain, 'config', 'user.name', 't');
+    git(brain, 'config', 'core.hooksPath', join(root, 'no-hooks'));
+    for (const f of ['commit-paths.mjs', 'brain-git-lock.mjs'])
+        copyFileSync(join(HERE, f), join(brain, 'tools', f));
+    writeFileSync(join(brain, 'vault.json'), '{}\n');
+    writeFileSync(join(brain, 'work.txt'), 'a\n');
+    git(brain, 'add', '-A');
+    git(brain, 'commit', '-q', '-m', 'start');
+    git(brain, 'remote', 'add', 'origin', remote);
+    git(brain, 'push', '-q', '-u', 'origin', 'master');
+    writeFileSync(join(brain, 'vault.json'), '{"x":1}\n');
+    writeFileSync(join(brain, 'work.txt'), 'half done\n');
+    const run = () => execFileSync(process.execPath, [join(brain, 'tools', 'commit-paths.mjs'), 'vault: x stored', 'vault.json'], { encoding: 'utf8', windowsHide: true }).trim();
+    assert.equal(run(), 'committed and pushed');
+    assert.equal(git(remote, 'log', '-1', '--format=%s'), 'vault: x stored');
+    assert.equal(git(remote, 'show', 'HEAD:vault.json'), '{"x":1}');
+    assert.match(git(brain, 'status', '--porcelain'), /work\.txt/, 'the other file is left uncommitted');
+    assert.equal(run(), 'nothing to commit');
+    const other = join(root, 'other');
+    execFileSync('git', ['clone', '-q', remote, other]);
+    git(other, 'config', 'user.email', 'o@example.com');
+    git(other, 'config', 'user.name', 'o');
+    git(other, 'config', 'core.hooksPath', join(root, 'no-hooks'));
+    writeFileSync(join(other, 'other.txt'), 'from another machine' + String.fromCharCode(10));
+    git(other, 'add', 'other.txt');
+    git(other, 'commit', '-q', '-m', 'other machine');
+    git(other, 'push', '-q', 'origin', 'master');
+    writeFileSync(join(brain, 'vault.json'), '{"x":2}' + String.fromCharCode(10));
+    const third = execFileSync(process.execPath, [join(brain, 'tools', 'commit-paths.mjs'), 'vault: x again', 'vault.json'], { encoding: 'utf8', windowsHide: true }).trim();
+    assert.equal(third, 'committed and pushed');
+    assert.equal(git(remote, 'show', 'HEAD:vault.json'), '{"x":2}');
+    assert.equal(git(remote, 'show', 'HEAD:other.txt'), 'from another machine');
+    rmSync(root, { recursive: true, force: true });
 });

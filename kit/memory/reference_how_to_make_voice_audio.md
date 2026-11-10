@@ -5,16 +5,16 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-11-02
-  updated: 2026-11-02
-  kit_version: 1
-  kit_hash: 585a795b13b4138f
+  updated: 2026-11-10
+  kit_version: 2
+  kit_hash: 20c0e767fb8aeda4
 ---
 
 # How to make voice audio for narration or a spoken brief
 
 A listener cannot scroll back, skim or see a table, so write for the ear first and choose the voice second.
 
-The assistant cannot hear. It writes the script, drives a text-to-speech service the owner already has, and checks the file by measuring and transcribing it. With no service, deliver the script ready to read aloud and say that no audio was made.
+The assistant cannot hear. It writes the script, drives a text-to-speech service the person already has, and checks the file by measuring and transcribing it. With no service, deliver the script ready to read aloud and say that no audio was made.
 
 ## What good looks like
 
@@ -38,7 +38,7 @@ Voices read 120 to 190 words a minute, depending on speed setting and pauses, so
 
 ## Choose a voice and keep it
 
-- Recall the owner's saved voice and language. If there are none, ask once: a man's or a woman's voice, and how it should come across (a calm teacher, an energetic coach). Play a sample, then save the choice and settings ([[reference_how_to_save_a_memory]]).
+- Recall the person's saved voice and language. If there are none, ask once: a man's or a woman's voice, and how it should come across (a calm teacher, an energetic coach). Play a sample, then save the choice and settings ([[reference_how_to_save_a_memory]]).
 - Keep one service, one voice and one short, plain delivery direction for every scene. In one test, pace varied about 7 percent across scenes with a minimal direction and 26.5 percent with a style tag on every scene.
 - Rewrite a dense scene for the ear rather than speeding the clip up, which sounds artificial. Pace follows the text, so regenerating returns the same pace (one rewrite raised a scene from 108 to 125 words a minute).
 - Bring clips to one loudness (about -14 LUFS for phones, for example with FFmpeg's loudnorm filter): raw clips differed by up to 4.7 dB, normalised ones by 0.5 dB or less.
@@ -50,11 +50,11 @@ A service that reports success is not evidence of good audio.
 
 1. Wait until the file stops growing: some tools write it progressively, and a half-written file plays fine but ends early. Compare its duration with words divided by pace.
 2. Transcribe it and compare with the script: language, numbers, names, ending. One Spanish script was spoken in English because the voice instruction defaulted to English while every field said Spanish. Dialects need a native listener.
-3. A person must listen to the whole file once: ask the owner, naming what to check (the first and last twenty seconds, every number and name, the joins between clips), and say which parts nobody heard ([[feedback_verify_before_claiming]]).
+3. A person must listen to the whole file once: ask the person, naming what to check (the first and last twenty seconds, every number and name, the joins between clips), and say which parts nobody heard ([[feedback_verify_before_claiming]]).
 
 ## Deliver
 
-Send a voice note that plays inline, in the audio format the app expects, not a file to open. Read the sent message back where the channel allows, then say "sent", not "you have it", and ask the owner to confirm when it matters. Sending to another person cannot be undone, so show it first ([[feedback_reversible_act_irreversible_ask]]).
+Send a voice note that plays inline, in the audio format the app expects, not a file to open. Read the sent message back where the channel allows, then say "sent", not "you have it", and ask the person to confirm when it matters. Sending to another person cannot be undone, so show it first ([[feedback_reversible_act_irreversible_ask]]).
 
 ## Related
 [[reference_how_to_make_a_video_presentation]] [[reference_how_to_save_a_memory]] [[reference_how_to_review_work_before_calling_it_done]]

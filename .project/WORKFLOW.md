@@ -39,7 +39,7 @@ matters more than which.
 | `hotfix/*` | Emergency, from `prod`. | Merge to `prod`, then `main` and `staging` so it is not lost |
 
 **Rules:**
-- Nobody pushes directly to `staging`, `main` or `prod`: PRs only, including the owner
+- Nobody pushes directly to `staging`, `main` or `prod`: PRs only, including the maintainer
 - A release moves upward only, staging to main to prod, and is tagged `vX.Y.Z` on prod
 - The version number is the same everywhere: package.json, the changelog, the tag, and the host's plugin
 - Work branches are deleted after merge

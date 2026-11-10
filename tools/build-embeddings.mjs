@@ -1,24 +1,3 @@
-// Build index/embeddings.json from memory slugs and descriptions.
-//
-// SEPARATE from build-index.mjs on purpose. Embedding 120 memories takes about 3 seconds and
-// loads a 120MB model; build-index runs on every commit via the pre-commit hook and must stay
-// instant. This runs only when memory changes, and the hook that consumes it degrades to
-// keyword-only when the file is stale or missing.
-//
-// WHY MULTILINGUAL AND NOT THE SMALLER ENGLISH MODEL
-// all-MiniLM-L6-v2 scored 100% on the 40-query eval AS THE CORPUS STOOD THEN, and is half the
-// size. Re-measured 2026-08-22 at 127 memories: 97.5%, one miss ("make the brain update itself"
-// wants reference_brain_v2_design and gets reference_brain_machine_update). Nothing regressed;
-// the corpus grew and two brain-update memories now compete. Quote the number with its date or
-// it becomes a claim nobody can check. It also scored
-// -0.001 on "كيفاش نسجل الكرياتين", worse than an unrelated memory, because it is English-only
-// and Arabic tokenizes to nothing. the owner writes Darija in Arabic script. paraphrase-multilingual
-// -MiniLM-L12-v2 scores 0.180 on that same query and picks the right memory, at the cost of
-// dropping the English eval to 92.5%. Measured 2026-08-19, both numbers on this corpus.
-//
-// The keyword channel is kept alongside, not replaced: it holds the exact-name queries
-// ("a specific person and a specific vendor") that dense retrieval blurs.
-
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
@@ -26,97 +5,81 @@ import { pipeline, env } from '@xenova/transformers';
 import { embedText, textHash } from './embed-text.mjs';
 import { probeBackendSync } from './embed-guard.mjs';
 import { load as loadWasm } from './embed-wasm.mjs';
-
 env.allowLocalModels = false;
-
 const BRAIN = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const IDX = join(BRAIN, 'index');
 export const MODEL = 'Xenova/all-MiniLM-L6-v2';
-
 const keywords = JSON.parse(readFileSync(join(IDX, 'keywords.json'), 'utf8'));
 const slugs = Object.keys(keywords.descriptions).sort();
-
-// Name, description and the start of the body: see embed-text.mjs for why and the measurement.
 const docs = slugs.map((s) => embedText(BRAIN, s, keywords.descriptions[s]));
-
 const t0 = Date.now();
-// The native runtime where it runs, else the same model on WebAssembly (a CPU without AVX, 2026-11-09): the backend
-// that works here is probed once in child processes and remembered (tools/embed-guard.mjs).
 const backend = process.env.HAVOK_EMBED_BACKEND || probeBackendSync(join(BRAIN, '.embed-probe.json'), MODEL);
-if (!backend) { console.error('the embedding model did not run here, natively or on WebAssembly: vectors not built. A model download that failed or timed out looks the same as a processor that cannot run it: run node tools/build-embeddings.mjs again; if it fails again, the processor likely lacks AVX and recall stays keyword only (nothing was saved, so the next run tries again)'); process.exit(3); }
+if (!backend) {
+    console.error('the embedding model did not run here, natively or on WebAssembly: vectors not built. A model download that failed or timed out looks the same as a processor that cannot run it: run node tools/build-embeddings.mjs again; if it fails again, the processor likely lacks AVX and recall stays keyword only (nothing was saved, so the next run tries again)');
+    process.exit(3);
+}
 const embed = backend === 'wasm' ? await loadWasm(MODEL) : await pipeline('feature-extraction', MODEL);
-if (backend === 'wasm') console.log('embedding on WebAssembly (the native runtime cannot run on this CPU)');
+if (backend === 'wasm')
+    console.log('embedding on WebAssembly (the native runtime cannot run on this CPU)');
 const loadMs = Date.now() - t0;
-
-// ONLY WHAT CHANGED IS EMBEDDED AGAIN (2026-09-28). Every save used to re-embed all 640 memories, one to
-// two minutes of full CPU on the host, and recall from other machines slowed to 17 s and timed out while it
-// ran (the locked-down client machine and a laptop client, 10:44 to 10:49). A vector is reused when the exact text it was made from is
-// unchanged, same model.
 const docHashes = docs.map((d) => hash(d));
 const reuse = new Map();
 try {
-  const prev = JSON.parse(readFileSync(join(IDX, 'embeddings.json'), 'utf8'));
-  if (prev.model === MODEL && Array.isArray(prev.docHashes)) prev.slugs.forEach((s, i) => reuse.set(s + ' ' + prev.docHashes[i], prev.vectors[i]));
-} catch { /* first build, or an older file without hashes: embed everything once */ }
+    const prev = JSON.parse(readFileSync(join(IDX, 'embeddings.json'), 'utf8'));
+    if (prev.model === MODEL && Array.isArray(prev.docHashes))
+        prev.slugs.forEach((s, i) => reuse.set(s + ' ' + prev.docHashes[i], prev.vectors[i]));
+}
+catch { }
 const t1 = Date.now();
 const vectors = [];
 let embedded = 0;
 for (let i = 0; i < docs.length; i++) {
-  const again = reuse.get(slugs[i] + ' ' + docHashes[i]);
-  if (again) { vectors.push(again); continue; }
-  const out = await embed(docs[i], { pooling: 'mean', normalize: true });
-  // 4 decimals: the full float wastes about 60% of the file for cosine differences far below
-  // anything that changes a ranking.
-  vectors.push(Array.from(out.data).map((x) => Math.round(x * 1e4) / 1e4));
-  embedded++;
+    const again = reuse.get(slugs[i] + ' ' + docHashes[i]);
+    if (again) {
+        vectors.push(again);
+        continue;
+    }
+    const out = await embed(docs[i], { pooling: 'mean', normalize: true });
+    vectors.push(Array.from(out.data).map((x) => Math.round(x * 1e4) / 1e4));
+    embedded++;
 }
 const embedMs = Date.now() - t1;
-
 mkdirSync(IDX, { recursive: true });
 const payload = {
-  model: MODEL,
-  dims: vectors[0]?.length ?? 0,
-  count: slugs.length,
-  // Fingerprint of the input, so the consumer can tell a stale index from a current one without
-  // re-embedding anything. Descriptions are the only thing embedded, so they are the only thing
-  // that needs hashing.
-  // Hash of exactly what was embedded (embed-text.mjs), body start included since 2026-09-25, so a
-  // body edit is seen as stale. The field name is kept so older readers still find it.
-  descriptionsHash: textHash(BRAIN, keywords.descriptions),
-  slugs,
-  docHashes,
-  vectors,
+    model: MODEL,
+    dims: vectors[0]?.length ?? 0,
+    count: slugs.length,
+    descriptionsHash: textHash(BRAIN, keywords.descriptions),
+    slugs,
+    docHashes,
+    vectors,
 };
 writeFileSync(join(IDX, 'embeddings.json'), JSON.stringify(payload), 'utf8');
-
-/* THE QUESTIONS GET THEIR OWN VECTORS. Each question is embedded on its own rather than appended to
-   the description: averaging them into one vector is the dilution this was meant to cure, and it is
-   why the file keeps parallel arrays with the slug repeated. Same model, same normalisation, so a
-   question vector and a description vector are directly comparable and recall can take the better
-   of the two. Costs about 4 ms each and the file only grows with questions actually written. */
 let questionRows = { slugs: [], texts: [] };
-try { questionRows = JSON.parse(readFileSync(join(IDX, 'questions.json'), 'utf8')); } catch { /* none written yet */ }
+try {
+    questionRows = JSON.parse(readFileSync(join(IDX, 'questions.json'), 'utf8'));
+}
+catch { }
 const qVectors = [];
 for (const q of questionRows.texts || []) {
-  const out = await embed(q, { pooling: 'mean', normalize: true });
-  qVectors.push(Array.from(out.data).map((x) => Math.round(x * 1e4) / 1e4));
+    const out = await embed(q, { pooling: 'mean', normalize: true });
+    qVectors.push(Array.from(out.data).map((x) => Math.round(x * 1e4) / 1e4));
 }
 const qPayload = {
-  model: MODEL,
-  dims: qVectors[0]?.length ?? 0,
-  count: qVectors.length,
-  questionsHash: hash((questionRows.texts || []).join('')),
-  slugs: questionRows.slugs || [],
-  vectors: qVectors,
+    model: MODEL,
+    dims: qVectors[0]?.length ?? 0,
+    count: qVectors.length,
+    questionsHash: hash((questionRows.texts || []).join('')),
+    slugs: questionRows.slugs || [],
+    vectors: qVectors,
 };
 writeFileSync(join(IDX, 'question-embeddings.json'), JSON.stringify(qPayload), 'utf8');
-
 function hash(str) {
-  let h = 5381;
-  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
-  return h.toString(36);
+    let h = 5381;
+    for (let i = 0; i < str.length; i++)
+        h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+    return h.toString(36);
 }
-
 const bytes = Buffer.byteLength(JSON.stringify(payload));
 console.log(`embeddings: ${slugs.length} memories, ${payload.dims} dims, ${Math.round(bytes / 1024)}KB`);
 console.log(`model load ${loadMs}ms, embed ${embedMs}ms, ${embedded} embedded, ${slugs.length - embedded} reused`);

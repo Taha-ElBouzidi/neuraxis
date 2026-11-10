@@ -14,9 +14,13 @@ export function installPlan(targetText, sourceText, existing) {
     return { backup: existing.includes(name) ? '' : name, copy: true };
 }
 const parts = (v) => v.split('.').map((n) => parseInt(n, 10) || 0);
-const older = (a, b) => { const [x, y] = [parts(a), parts(b)]; for (let i = 0; i < 3; i++)
-    if ((x[i] || 0) !== (y[i] || 0))
-        return (x[i] || 0) - (y[i] || 0); return 0; };
+const older = (a, b) => {
+    const [x, y] = [parts(a), parts(b)];
+    for (let i = 0; i < 3; i++)
+        if ((x[i] || 0) !== (y[i] || 0))
+            return (x[i] || 0) - (y[i] || 0);
+    return 0;
+};
 export function restoreChoice(baks) {
     const originals = baks.filter((b) => b.startsWith('statusline.mjs.bak-original-')).sort();
     if (originals.length)
@@ -24,18 +28,22 @@ export function restoreChoice(baks) {
     const versioned = baks.filter((b) => /^statusline\.mjs\.bak-\d+\.\d+\.\d+$/.test(b)).sort((a, b) => older(a.slice(19), b.slice(19)));
     return versioned[0] ?? '';
 }
-const read = (f) => { try {
-    return readFileSync(f, 'utf8');
-}
-catch {
-    return null;
-} };
-const baksIn = (dir) => { try {
-    return readdirSync(dir).filter((f) => f.startsWith('statusline.mjs.bak-'));
-}
-catch {
-    return [];
-} };
+const read = (f) => {
+    try {
+        return readFileSync(f, 'utf8');
+    }
+    catch {
+        return null;
+    }
+};
+const baksIn = (dir) => {
+    try {
+        return readdirSync(dir).filter((f) => f.startsWith('statusline.mjs.bak-'));
+    }
+    catch {
+        return [];
+    }
+};
 export function installStatusline(source, target) {
     const plan = installPlan(read(target), read(source), baksIn(dirname(target)));
     if (plan.backup)

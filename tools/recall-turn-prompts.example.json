@@ -1,5 +1,5 @@
 {
-  "_about": "Synthetic prompts for tools/recall-turn.test.mjs in a public copy of the engine. Written for the test, not typed by anyone. The owner's instance uses recall-turn-prompts.json, real prompts that never leave it (2026-11-09).",
+  "_about": "Synthetic prompts for tools/recall-turn.test.mjs in a public copy of the engine. Written for the test, not typed by anyone. An instance may keep its own real prompts in recall-turn-prompts.json, which never leaves it.",
   "cases": [
     { "prompt": "how does the brain server answer a recall request", "previous": [] },
     { "prompt": "where are the memories kept and how is the index built", "previous": [] },

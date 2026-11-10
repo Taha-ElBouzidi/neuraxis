@@ -41,7 +41,7 @@ neuraxis/
   docs/
     recall.svg         <- the diagram the README embeds
   .project/            <- governance docs (you are here)
-  .github/             <- PR template, CODEOWNERS, CLA workflow
+  .github/             <- PR template, CODEOWNERS, CLA workflow, CONTRIBUTING, SECURITY and CLA documents
   CLAUDE.md            <- project identity, AI entry point
   AGENTS.md            <- for the agent installing it, every step verifiable
   README.md            <- for the human

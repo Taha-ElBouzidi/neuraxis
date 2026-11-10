@@ -2,7 +2,7 @@ name: CLA
 
 # Every pull request must carry a signed Contributor Licence Agreement before it can merge.
 # The project is AGPL-3.0 and is also offered under commercial licences, which is only possible
-# if the owner can relicense every line. See CLA.md and CONTRIBUTING.md.
+# if the maintainer can relicense every line. See .github/CLA.md and .github/CONTRIBUTING.md.
 #
 # Signatures are stored on a branch of this repository by the action itself, using the
 # repository's own token. No external service, no extra secret.
@@ -30,6 +30,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: 'signatures/cla.json'
-          path-to-document: 'https://github.com/${{ github.repository }}/blob/main/CLA.md'
+          path-to-document: 'https://github.com/${{ github.repository }}/blob/main/.github/CLA.md'
           branch: 'cla-signatures'
           allowlist: '${{ github.repository_owner }},dependabot[bot]'

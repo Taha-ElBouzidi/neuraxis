@@ -1,33 +1,4 @@
 #!/usr/bin/env node
-// UserPromptSubmit: the only hook that runs BEFORE the reply is written.
-//
-// Two jobs, one process, because this fires on every single turn and a second spawn would
-// double the per-turn cost for no reason:
-//   1. RECALL   - name the memories matching the prompt, so the brain gets used.
-//   2. BUDGET   - state a length ceiling, so the reply is short on the FIRST attempt.
-//
-// WHY THIS EVENT AND NOT Stop
-// check-stop.mjs already proves a Stop hook can read the finished reply and force a rewrite;
-// that is how the em-dash rule actually holds. It is the wrong tool for length. Blocking IS
-// regeneration: the wall of text was already written and paid for, and now a second full reply
-// gets generated. The owner, 2026-08-07: "so it doesn't regenerate a reply it does it in first try".
-//
-// The Claude Code hook reference was checked rather than recalled (2026-08-07). Of every event
-// in the lifecycle, only UserPromptSubmit and UserPromptExpansion fire before generation, the
-// latter offers `decision: block` and nothing else, and no hook anywhere can constrain the
-// assistant's prose directly. MessageDisplay can swap what appears on screen but explicitly
-// leaves the transcript untouched, which would hide the problem rather than fix it. So an
-// injected budget on this event is not the best available option, it is the only one.
-//
-// WHY IT WORKS WHEN THE SAME RULE IN REFLEX DOES NOT
-// feedback_reply_length has existed in the brain for a while and the replies stayed long. A
-// rule loaded once at session start is competing with a hundred thousand tokens of recency by
-// turn fifty and loses. This arrives attached to the prompt, so it is the newest thing in the
-// window every time. Nothing about the rule changed, only when it is delivered.
-//
-// FAILS SILENT ALWAYS. Running on every turn means a crash here would break every turn of
-// every session on every machine. The worst acceptable outcome is the old behaviour.
-
 import { readFileSync, existsSync, writeFileSync, appendFileSync, unlinkSync, statSync, mkdirSync, readdirSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,1395 +7,1089 @@ import { createHash } from 'node:crypto';
 import { terms as qterms } from '../tools/tokenize.mjs';
 import { CONTEXT_CHARS, contextMessage, prepareQueries, translateSync } from '../tools/recall-turn.mjs';
 import { reportFailure } from '../tools/brain-recover.mjs';
-// An install of the public repository, under its name or its old one (tools/public-install.mjs).
 const PUBLIC_NAME = /^(neuraxis|infinite-context)$/;
 import { execFileSync as execFileSyncRaw, spawn } from 'node:child_process';
-// THE HOOK'S OWN DEADLINE (HAVOK, 2026-11-03). On the locked-down client machine the brain was briefly unreachable over the office relay,
-// the hook ran past Claude Code's 10 s limit and was killed: the turn lost its rules and recall and nothing said so.
-// Every blocking call is clipped to what is left of HOOK_LIMIT_MS; once it is spent, calls fail at once and the
-// injection says "brain unreachable, recall skipped" in one line. Tested by tools/preturn-deadline.test.mjs.
 let DEADLINE_HIT = false;
 function execFileSync(file, args, opts = {}) {
-  const left = msLeft();
-  if (left < 150) { DEADLINE_HIT = true; throw new Error('hook deadline reached'); }
-  try {
-    return execFileSyncRaw(file, args, { ...opts, timeout: Math.min(Number(opts.timeout) || left, left) });
-  } catch (e) {
-    if (msLeft() < 150) DEADLINE_HIT = true;
-    throw e;
-  }
+    const left = msLeft();
+    if (left < 150) {
+        DEADLINE_HIT = true;
+        throw new Error('hook deadline reached');
+    }
+    try {
+        return execFileSyncRaw(file, args, { ...opts, timeout: Math.min(Number(opts.timeout) || left, left) });
+    }
+    catch (e) {
+        if (msLeft() < 150)
+            DEADLINE_HIT = true;
+        throw e;
+    }
 }
 const HOOK_STARTED = Date.now();
-// The owner, 2026-10-16: "instead of 100,000 or 250, let's put it at 300,000 tokens". Same number as autoCompactWindow
-// in hooks/claude-settings.json.
-// Smart compaction rolled back 2026-10-22 (the owner: "it makes the agents dumber because they don't remember anything"):
-// the cue that asked him to approve a compaction from 300,000 tokens is off until a better way is tested.
 const SMART_COMPACTION = false;
 const COMPACT_FROM = 300000;
-
-// Synchronous HTTP to the local embed daemon.
-//
-// This hook is a short-lived process with a hard timeout, and every other read in it is
-// synchronous, so an async fetch would mean restructuring the whole file. Blocking curl is
-// crude but honest: 2s ceiling, loopback only, and ANY failure returns null, which drops the
-// turn to keyword-only recall and says so in the injection rather than silently degrading.
-// A file written by the daemon while it is alive, so the hook can skip the network entirely
-// when it is not.
-//
-// Even with --connect-timeout 1, a refused connection on Windows cost about 1100ms on every
-// turn with the daemon down, against 64ms for the whole hook before any of this existed. A
-// stat() is microseconds. The daemon writes this file on boot and removes it on exit, and a
-// stale file (a hard kill) costs exactly one slow turn before curl fails and it is cleared.
 const ALIVE = join(homedir(), '.claude', 'havok-embed.alive');
-
-// translateSync, the query building and the conversation reading live in tools/recall-turn.mjs since the context
-// release (2026-11-02): the brain server runs the same code for the mod, so both give the same recall.
-
-// Ask the SERVER machine for a vector when this machine has no local daemon.
-//
-// The owner, 2026-08-21: "I want this server here to have the brain, the embedding system, the memory
-// and everything. And all other machines, when they want to use it, they access it." Until now
-// this hook only ever asked 127.0.0.1, so a laptop with no daemon silently dropped to keyword
-// recall and the whole point of hosting the model centrally was never wired up.
-//
-// The address is DISCOVERED, not configured: server-endpoint.json travels in the repo, so no
-// machine is hand-configured with a URL. The token comes from that machine own vault, so no
-// credential is ever fetched from the server it authenticates to.
-//
-// LAN ONLY, on purpose. The owner, 2026-08-21: "when I mean over the internet, I mean over the
-// network. If I am not on the same network I have to use a specific proxy or a VPN, so that
-// nobody else can access it." An earlier version tunnelled this to a public hostname; that was
-// deleted, and with it the objection that Cloudflare terminates TLS and could read secrets.
-//
-// BRAIN is passed in rather than closed over. It is declared further down this file, inside a
-// block, so a module-level function referencing it throws at call time. That exact mistake already
-// cost hours here once, in translateSync, which is why translateSync takes it as a parameter too.
 let LAST_SERVER_V = null;
 let RATE_LIMITED = false;
 let REMOTE = undefined;
-
-/* WHY SEMANTIC RECALL MISSED A TURN, as it happened, for the note. The owner, 2026-10-31: "these fake off happen a
-   lot we should diagnose them". The note said "semantic recall is OFF (embed server not running)" whatever
-   went wrong: 54 of 3175 turns on the host, while the daemon was healthy. Traced that day: the brain server took
-   17.7 s on its first recall after the index changed, the hook gave up at 9 s and marked it down for 3
-   minutes, and the daemon could not stand in because a session start that found it busy had deleted its alive
-   marker. So each path records what actually happened, and "not running" is said only after a probe finds
-   nothing listening. tools/test-recall-note.mjs. */
 const MISS = { remote: '', local: '' };
 const msLeft = () => HOOK_LIMIT_MS - HOOK_MARGIN_MS - (Date.now() - HOOK_STARTED);
 const EMBED_PORT = process.env.HAVOK_EMBED_PORT || 8477;
-
 function skippedWhy() {
-  const m = readRemoteDown();
-  if (!m) return 'the brain server was skipped';
-  const ago = Math.max(0, Math.round((Date.now() - m.at) / 1000));
-  const left = Math.max(0, Math.round((DOWN_COOLDOWN_MS - (Date.now() - m.at)) / 1000));
-  return 'the brain server failed ' + ago + ' s ago (' + m.reason + ') and is skipped for another ' + left + ' s';
+    const m = readRemoteDown();
+    if (!m)
+        return 'the brain server was skipped';
+    const ago = Math.max(0, Math.round((Date.now() - m.at) / 1000));
+    const left = Math.max(0, Math.round((DOWN_COOLDOWN_MS - (Date.now() - m.at)) / 1000));
+    return 'the brain server failed ' + ago + ' s ago (' + m.reason + ') and is skipped for another ' + left + ' s';
 }
-
 function remoteFailWhy(e, elapsedMs, cfg, maxSec) {
-  if (e instanceof SyntaxError) return 'the brain server answered with something that is not JSON';
-  const timedOut = (e && e.code === 'ETIMEDOUT') || (e && e.status === 28);
-  if (!timedOut) return 'the brain server call failed: ' + curlWhy(e);
-  if (elapsedMs >= ((cfg && cfg.ct) || 1) * 1000 + 1000) return 'the brain server did not answer within ' + maxSec + ' s (busy, not off)';
-  return 'the brain server did not take the connection within ' + ((cfg && cfg.ct) || 1) + ' s (busy, or down)';
+    if (e instanceof SyntaxError)
+        return 'the brain server answered with something that is not JSON';
+    const timedOut = (e && e.code === 'ETIMEDOUT') || (e && e.status === 28);
+    if (!timedOut)
+        return 'the brain server call failed: ' + curlWhy(e);
+    if (elapsedMs >= ((cfg && cfg.ct) || 1) * 1000 + 1000)
+        return 'the brain server did not answer within ' + maxSec + ' s (busy, not off)';
+    return 'the brain server did not take the connection within ' + ((cfg && cfg.ct) || 1) + ' s (busy, or down)';
 }
-
-/* Is the local embed daemon up, busy, or down? Asked only on a turn that already missed semantic recall, never
-   on a healthy one. The exit code cannot tell busy from down on Windows: a closed localhost port also ends in
-   curl exit 28, after about 1.1 s, because Windows retries the connection (measured 2026-10-31). The connect
-   time can: a busy daemon still takes the TCP connection at once, a closed port never does. */
 let DAEMON_STATE = null;
 function daemonState(brain) {
-  if (DAEMON_STATE) return DAEMON_STATE;
-  // Only where the daemon is a real fallback: a machine holding the memories with the runtime installed. A
-  // server-only client (a laptop client) recalls through the brain server alone, so its daemon is beside the point.
-  if (!holdsMemoriesLocally(brain) || !existsSync(join(brain, 'node_modules', '@xenova', 'transformers'))) return (DAEMON_STATE = 'none');
-  if (msLeft() < 1500) return 'unknown';
-  let out = '';
-  try {
-    out = execFileSync('curl', ['-s', '-w', '\\n%{http_code} %{time_connect}', '--connect-timeout', '1', '--max-time', '1',
-      'http://127.0.0.1:' + EMBED_PORT + '/health'], { encoding: 'utf8', windowsHide: true, timeout: 2500, stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch (e) { out = String((e && e.stdout) || ''); }
-  const [code, connect] = (out.trim().split('\n').pop() || '').split(' ');
-  DAEMON_STATE = code === '200' ? 'up' : Number(connect) > 0 ? 'busy' : out ? 'down' : 'unknown';
-  if (DAEMON_STATE === 'down') ensureEmbedDaemon(brain);
-  return DAEMON_STATE;
+    if (DAEMON_STATE)
+        return DAEMON_STATE;
+    if (!holdsMemoriesLocally(brain) || !existsSync(join(brain, 'node_modules', '@xenova', 'transformers')))
+        return (DAEMON_STATE = 'none');
+    if (msLeft() < 1500)
+        return 'unknown';
+    let out = '';
+    try {
+        out = execFileSync('curl', ['-s', '-w', '\\n%{http_code} %{time_connect}', '--connect-timeout', '1', '--max-time', '1',
+            'http://127.0.0.1:' + EMBED_PORT + '/health'], { encoding: 'utf8', windowsHide: true, timeout: 2500, stdio: ['ignore', 'pipe', 'ignore'] });
+    }
+    catch (e) {
+        out = String((e && e.stdout) || '');
+    }
+    const [code, connect] = (out.trim().split('\n').pop() || '').split(' ');
+    DAEMON_STATE = code === '200' ? 'up' : Number(connect) > 0 ? 'busy' : out ? 'down' : 'unknown';
+    if (DAEMON_STATE === 'down')
+        ensureEmbedDaemon(brain);
+    return DAEMON_STATE;
 }
-
 function semanticMissNote(brain) {
-  const why = [MISS.remote || (remoteRecentlyFailed() ? skippedWhy() : 'the brain server gave no usable answer')];
-  const d = daemonState(brain);
-  if (d === 'down') why.push('the local embed server is not running (nothing takes a connection on 127.0.0.1:' + EMBED_PORT + '). Start it: node tools/embed-server.mjs');
-  else if (d === 'busy') why.push('the local embed server is running but busy (it took the connection and did not answer within 1 s)');
-  else if (d === 'up' && MISS.local) why.push(MISS.local);
-  return 'NOTE: semantic recall missed this turn, so the recall below is keyword only and a paraphrase may not match. Why: ' + why.join('; ') + '.';
+    const why = [MISS.remote || (remoteRecentlyFailed() ? skippedWhy() : 'the brain server gave no usable answer')];
+    const d = daemonState(brain);
+    if (d === 'down')
+        why.push('the local embed server is not running (nothing takes a connection on 127.0.0.1:' + EMBED_PORT + '). Start it: node tools/embed-server.mjs');
+    else if (d === 'busy')
+        why.push('the local embed server is running but busy (it took the connection and did not answer within 1 s)');
+    else if (d === 'up' && MISS.local)
+        why.push(MISS.local);
+    return 'NOTE: semantic recall missed this turn, so the recall below is keyword only and a paraphrase may not match. Why: ' + why.join('; ') + '.';
 }
-// Where the token comes from, cheapest source first.
-//
-// MEASURED 2026-08-22: reading it from the vault costs 155-165ms, because it spawns a node process
-// and does an age decryption. The recall round trip it protects costs 6.7ms. Paying 165ms every
-// prompt to re-fetch a credential that has not changed is 23x the cost of the work itself, and it
-// was the whole reason server-side recall first measured SLOWER than local matching, 431ms against
-// 121ms. The architecture was fine; the credential lookup in front of it was not.
-//
-// TWO SEPARATE FILES ON PURPOSE, and mixing them up would be serious:
-//   SERVER_TOKEN_FILE is the server's OWN token on the machine that runs it. Read it, never write
-//     it, and NEVER delete it. Deleting it would take the brain server down for every machine.
-//   TOKEN_CACHE is this hook's decrypted copy on a client machine. Safe to delete, and deleting it
-//     is exactly how a rotation self-heals: the next turn re-reads the vault.
-// Neither is git-tracked.
 const SERVER_TOKEN_FILE = join(homedir(), '.claude', 'havok-server-token');
 const TOKEN_CACHE = join(homedir(), '.claude', 'havok-token-cache');
-
 function remoteEmbedConfig(brain) {
-  if (REMOTE !== undefined) return REMOTE;
-  REMOTE = null;
-  try {
-    const ep = JSON.parse(readFileSync(join(brain, 'server-endpoint.json'), 'utf8'));
-    if (!ep.url) return REMOTE;
-
-    // Never resolve a name to reach yourself.
-    //
-    // server-endpoint.json publishes a HOSTNAME on purpose, because the host takes a DHCP address
-    // that changes on reboot. MEASURED 2026-08-22 on this machine: resolving "server" costs 316ms
-    // against 88ms for loopback, so name resolution alone was 228ms of every prompt. On the host
-    // that cost buys literally nothing, since the destination is this machine.
-    //
-    // This does NOT help the other machines, which still resolve the name and still pay it. That
-    // is a real cost a laptop client has been paying on every prompt all along, hidden until now because
-    // this machine used its local daemon and never resolved anything. Tailscale's MagicDNS is the
-    // intended fix; if it does not deliver, an IP cache with fallback is the next move.
-    let url = ep.url;
+    if (REMOTE !== undefined)
+        return REMOTE;
+    REMOTE = null;
     try {
-      const host = String(JSON.parse(readFileSync(join(brain, 'vault-recipients.json'), 'utf8')).host || '').toUpperCase();
-      const me = String(process.env.HAVOK_MACHINE_NAME || hostname()).trim().toUpperCase();
-      if (host && host === me) url = url.replace(/\/\/[^/:]+/, '//127.0.0.1');
-    } catch { /* no recipients file: keep the published url */ }
-
-    let token = '';
-    for (const f of [SERVER_TOKEN_FILE, TOKEN_CACHE]) {
-      try { token = readFileSync(f, 'utf8').trim(); } catch { /* next source */ }
-      if (token) break;
+        const ep = JSON.parse(readFileSync(join(brain, 'server-endpoint.json'), 'utf8'));
+        if (!ep.url)
+            return REMOTE;
+        let url = ep.url;
+        try {
+            const host = String(JSON.parse(readFileSync(join(brain, 'vault-recipients.json'), 'utf8')).host || '').toUpperCase();
+            const me = String(process.env.HAVOK_MACHINE_NAME || hostname()).trim().toUpperCase();
+            if (host && host === me)
+                url = url.replace(/\/\/[^/:]+/, '//127.0.0.1');
+        }
+        catch { }
+        let token = '';
+        for (const f of [SERVER_TOKEN_FILE, TOKEN_CACHE]) {
+            try {
+                token = readFileSync(f, 'utf8').trim();
+            }
+            catch { }
+            if (token)
+                break;
+        }
+        if (!token) {
+            token = execFileSync(process.execPath, [join(brain, 'tools', 'vault.mjs'), 'get', 'havok_server_token'], { encoding: 'utf8', windowsHide: true, timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+            if (token) {
+                try {
+                    writeFileSync(TOKEN_CACHE, token, { encoding: 'utf8', mode: 0o600 });
+                }
+                catch { }
+            }
+        }
+        let cacert = '';
+        if (/^https:/i.test(url)) {
+            const c = join(brain, 'server-cert.pem');
+            if (existsSync(c))
+                cacert = c.replace(/\\/g, '/');
+        }
+        let connectTo = '';
+        try {
+            const ep2 = JSON.parse(readFileSync(join(brain, 'server-endpoint.json'), 'utf8'));
+            const magic = (ep2.tailnet && ep2.tailnet.magicdns) || '';
+            const m = url.match(/^https?:\/\/([^:\/]+)(?::(\d+))?/);
+            if (magic && m && /^[0-9.]+$/.test(m[1]) && m[1] !== '127.0.0.1') {
+                connectTo = magic + ':' + m[2] + ':' + m[1] + ':' + m[2];
+                url = 'https://' + magic + (m[2] ? ':' + m[2] : '');
+            }
+        }
+        catch { }
+        const ct = connectTo ? 4 : 1;
+        if (token)
+            REMOTE = { url, token, cacert, connectTo, ct };
     }
-    if (!token) {
-      token = execFileSync(process.execPath, [join(brain, 'tools', 'vault.mjs'), 'get', 'havok_server_token'],
-        { encoding: 'utf8', windowsHide: true, timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      // mode 0600 so it is not world-readable. Best effort: a failed cache write costs latency,
-      // never correctness.
-      if (token) { try { writeFileSync(TOKEN_CACHE, token, { encoding: 'utf8', mode: 0o600 }); } catch { /* optimisation only */ } }
-    }
-    // Certificate PINNING for https. The server uses a self-signed certificate on purpose, so the
-    // only thing that makes it trustworthy is that we accept exactly this one and nothing else.
-    // Without the cacert line curl would reject it outright; with a blanket --insecure it would
-    // accept anything, which is worse than plaintext because it looks encrypted while any machine
-    // on the network could impersonate the server. Neither shortcut is acceptable, so the public
-    // certificate travels in the repo and is named explicitly.
-    let cacert = '';
-    if (/^https:/i.test(url)) {
-      const c = join(brain, 'server-cert.pem');
-      if (existsSync(c)) cacert = c.replace(/\\/g, '/');
-    }
-    // VERIFY AGAINST THE NAME, CONNECT TO THE IP. server-endpoint.json publishes the tailnet IP,
-    // and an old curl refuses to match an IP against the certificate even though the cert carries
-    // that IP as a SAN: schannel exit 60, "CertGetNameString() failed to match connection
-    // hostname". See reference_curl_schannel_ip_cert_mismatch.
-    //
-    // PROVEN ON the locked-down client machine, 2026-09-15, by that machine's own agent replaying these exact configs:
-    // the ONLY curl on its PATH is C:\Windows\System32\curl.exe 8.4.0, and both /pulse and
-    // /recall came back exit 60. So that laptop has been running KEYWORD-ONLY recall while
-    // everything else said it was connected, and no pulse from it could ever arrive.
-    //
-    // brain-client.mjs and pull-from-server.mjs were fixed earlier the same day and this file was
-    // missed, which is the lesson: the fix belonged to every caller of the endpoint, not to the
-    // two tools that happened to surface it.
-    //
-    // connectTo is empty on the host itself, where url has already been rewritten to loopback.
-    let connectTo = '';
-    try {
-      const ep2 = JSON.parse(readFileSync(join(brain, 'server-endpoint.json'), 'utf8'));
-      const magic = (ep2.tailnet && ep2.tailnet.magicdns) || '';
-      const m = url.match(/^https?:\/\/([^:\/]+)(?::(\d+))?/);
-      if (magic && m && /^[0-9.]+$/.test(m[1]) && m[1] !== '127.0.0.1') {
-        connectTo = magic + ':' + m[2] + ':' + m[1] + ':' + m[2];
-        url = 'https://' + magic + (m[2] ? ':' + m[2] : '');
-      }
-    } catch { /* older endpoint file: keep the raw url */ }
-    // CONNECT TIMEOUT depends on WHERE the server is, which the old single value could not express.
-    // 1 second was chosen because a refused connection costs about 1100ms on every prompt, and on
-    // the host that is right: the destination is loopback and a second is an eternity. From a
-    // laptop across a DERP relay it is not: the handshake can outlast it and recall silently drops
-    // to keyword, which is exactly reference_recall_connect_timeout_derp. Remote gets 4.
-    const ct = connectTo ? 4 : 1;
-    if (token) REMOTE = { url, token, cacert, connectTo, ct };
-  } catch { /* no endpoint, no vault access, or no age key: stay on keyword recall */ }
-  return REMOTE;
+    catch { }
+    return REMOTE;
 }
-
-// Called when the server rejects our token, so a rotation heals itself on the next turn instead of
-// leaving the machine locked out until someone notices. Only ever removes the CACHE.
 function forgetCachedToken() {
-  try { unlinkSync(TOKEN_CACHE); } catch { /* was not cached */ }
-}
-
-// The behaviour rules, from the server, when this machine has no local copy.
-//
-// Found 2026-08-22 while testing a machine that holds no index at all: it got recall from the
-// server but only ONE rule, the tier line computed locally, plus a "rules unavailable" notice. It
-// lost all eight behaviour rules. That is worse than losing recall. An agent with no rules writes
-// long, claims things are done it has not verified, and tells the owner the problem is his end, which
-// are precisely the behaviours these rules exist to stop, and nothing on screen would say why.
-//
-// A SECOND round trip, and only for machines with no local rules.json. Folding rules into the
-// recall response would save the call but add roughly 3KB to every response on every machine that
-// does not need it. This costs one extra curl spawn on the rare machine, and nothing on the rest.
-function fetchRulesRemote(brain) {
-  if (remoteRecentlyFailed()) return null;
-  const cfg = remoteEmbedConfig(brain);
-  if (!cfg) return null;
-  try {
-    const conf = 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
-      + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
-      + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
-      + 'url = "' + cfg.url + '/rules"' + '\n'
-      + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 6' + '\n';
-    const out = curlRemote(conf, 6000, cfg);
-    const parsed = JSON.parse(out || '{}');
-    if (Array.isArray(parsed.rules) && parsed.rules.length) {
-      try { writeFileSync(RULES_CACHE, JSON.stringify({ at: new Date().toISOString(), rules: parsed.rules }), 'utf8'); } catch { /* a cache that cannot be written is only a missed cache */ }
-      return parsed.rules;
+    try {
+        unlinkSync(TOKEN_CACHE);
     }
-    return null;
-  } catch (e) {
-    // A rules call that could not reach the server marks it down, so recall on the same turn skips
-    // straight to its fallback instead of waiting out a second timeout: 12.2 s on the locked-down client machine when the
-    // server was unreachable (2026-09-28).
-    if (!(e instanceof SyntaxError)) markRemoteDown(curlWhy(e));
-    return null;
-  }
+    catch { }
 }
-// THE LAST RULES THE SERVER SENT, kept on this machine (2026-09-28). A server-only machine has no
-// rules.json, so one failed round trip left the turn with no behaviour rules at all: seen on
-// the locked-down client machine right after a restart, when the first call timed out. Rules are not secret; memories
-// still come only from the server.
+function fetchRulesRemote(brain) {
+    if (remoteRecentlyFailed())
+        return null;
+    const cfg = remoteEmbedConfig(brain);
+    if (!cfg)
+        return null;
+    try {
+        const conf = 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
+            + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
+            + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
+            + 'url = "' + cfg.url + '/rules"' + '\n'
+            + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 6' + '\n';
+        const out = curlRemote(conf, 6000, cfg);
+        const parsed = JSON.parse(out || '{}');
+        if (Array.isArray(parsed.rules) && parsed.rules.length) {
+            try {
+                writeFileSync(RULES_CACHE, JSON.stringify({ at: new Date().toISOString(), rules: parsed.rules }), 'utf8');
+            }
+            catch { }
+            return parsed.rules;
+        }
+        return null;
+    }
+    catch (e) {
+        if (!(e instanceof SyntaxError))
+            markRemoteDown(curlWhy(e));
+        return null;
+    }
+}
 const RULES_CACHE = resolve(process.env.HAVOK_HOME || resolve(homedir(), '.claude'), 'havok-rules-cache.json');
 function cachedRules() {
-  try { const c = JSON.parse(readFileSync(RULES_CACHE, 'utf8')); return Array.isArray(c.rules) && c.rules.length ? c.rules : null; }
-  catch { return null; }
+    try {
+        const c = JSON.parse(readFileSync(RULES_CACHE, 'utf8'));
+        return Array.isArray(c.rules) && c.rules.length ? c.rules : null;
+    }
+    catch {
+        return null;
+    }
 }
-
-// Remember that the server was unreachable, so a laptop off the network does not pay for the
-// discovery on every single turn.
-//
-// MEASURED 2026-08-22, on this machine, rather than guessed. With the server unreachable:
-//   unroutable address, connect-timeout 2 : 2046 ms
-//   unroutable address, connect-timeout 1 : 1029 ms
-//   name does not resolve, timeout 2      : 1560 ms
-//   name does not resolve, timeout 1      : 1024 ms
-//   server reachable                      :  254 ms
-// So a laptop away from home would have added one to two seconds to EVERY prompt, which reads as
-// "Claude got slow" and never as "I left the house". a laptop client raised it before the owner noticed it,
-// which is the only reason it is being fixed now rather than after a week of complaints.
-//
-// A shorter timeout alone does not solve it: one second on every turn forever is still a tax on
-// the common case. A stat() is microseconds, so after a failure the remote is skipped entirely
-// until the cooldown lapses. Same trick the local daemon check already uses.
 const REMOTE_DOWN = join(process.env.HAVOK_HOME || join(homedir(), '.claude'), 'havok-remote-embed-down');
-// 3 minutes, not 10. Measured 2026-08-31 (reference_recall_connect_timeout_derp): over the relay a
-// lost race is common and each one cost ten minutes of keyword-only recall. That fix never reached
-// this copy; the locked-down client machine lost recall for ten minutes again on 2026-09-17, 15:43 to 15:54.
 const DOWN_COOLDOWN_MS = 3 * 60 * 1000;
-
-// BEGIN curlRemote
-// A COLD RELAY LOSES THE FIRST RACE AND WINS THE SECOND. the locked-down client machine, 2026-09-17: after the laptop sat
-// idle, the first connection through the Madrid DERP relay took 6.9 s and the next ones 93 ms. The hook
-// gave up at connect-timeout 4 and marked the server down. So a failure in the CONNECT phase, over the
-// relay, gets one more try, while a slow answer or a missing curl does not.
-//
-// The retry only spends what is left of the hook's limit: settings.json runs this hook with a 10 s
-// timeout, and past it Claude Code discards the whole injection, rules included. The margin keeps time
-// for the work after the call. Tested by tools/test-remote-retry.mjs, which runs this exact text.
 const HOOK_LIMIT_MS = Number(process.env.HAVOK_PRETURN_LIMIT_MS) || 5000;
 const HOOK_MARGIN_MS = 500;
 function curlRemote(conf, timeoutMs, cfg) {
-  const t0 = Date.now();
-  try {
-    return execFileSync('curl', ['-K', '-'], {
-      input: conf, encoding: 'utf8', windowsHide: true, timeout: timeoutMs, stdio: ['pipe', 'pipe', 'ignore'],
-    });
-  } catch (e) {
-    const inConnectPhase = typeof e.status === 'number' && Date.now() - t0 < ((cfg && cfg.ct) || 1) * 1000 + 1000;
-    const leftMs = HOOK_LIMIT_MS - HOOK_MARGIN_MS - (Date.now() - HOOK_STARTED);
-    const leftSec = Math.floor(leftMs / 1000);
-    if (!inConnectPhase || !(cfg && cfg.connectTo) || leftSec < 1) throw e;
-    const retry = conf
-      .replace(/connect-timeout = \d+/, 'connect-timeout = ' + Math.min(cfg.ct, leftSec))
-      .replace(/max-time = \d+/, 'max-time = ' + leftSec);
-    return execFileSync('curl', ['-K', '-'], {
-      input: retry, encoding: 'utf8', windowsHide: true, timeout: Math.min(timeoutMs, leftMs), stdio: ['pipe', 'pipe', 'ignore'],
-    });
-  }
-}
-
-// What curl actually reported, for the down mark. Every failure used to write the same inferred
-// sentence, so a TLS race over the relay read exactly like the server being off, and nobody found the
-// cause for weeks (reference_recall_connect_timeout_derp). Restored 2026-09-17: the laptop had this on
-// 2026-08-31 and a memory commit from a stale clone removed it on 2026-09-03.
-function curlWhy(e) {
-  if (e instanceof SyntaxError) return 'the server answered with something that is not JSON';
-  if (e && e.code === 'ENOENT') return 'curl not found on this machine';
-  if (e && e.code === 'ETIMEDOUT') return 'the hook stopped waiting for curl';
-  const reasons = {
-    6: 'could not resolve the server name',
-    7: 'could not connect (refused, or no route)',
-    28: 'timed out (connect or answer)',
-    35: 'TLS handshake failed',
-    52: 'the server closed the connection with no answer',
-    56: 'the connection was reset while receiving',
-    60: 'server certificate not trusted',
-    77: 'could not read the CA certificate file',
-  };
-  const status = e && e.status;
-  return typeof status === 'number' ? (reasons[status] || 'curl exit ' + status) : 'unknown failure';
-}
-// END curlRemote
-
-// The mark carries WHY, not just when. a laptop client, 2026-08-22: a degraded state that nothing can
-// explain leaves the user inferring it from answers feeling shallower. With a reason recorded,
-// `brain-client status` can say "remote embed skipped, marked down 4 minutes ago, connection
-// refused" instead of the user guessing.
-function readRemoteDown() {
-  try {
-    const raw = readFileSync(REMOTE_DOWN, 'utf8').trim();
-    // Tolerate the first format, a bare epoch, so an existing mark does not read as corrupt.
-    if (/^\d+$/.test(raw)) return { at: Number(raw), reason: 'unknown (written before reasons were recorded)' };
-    const j = JSON.parse(raw);
-    return { at: Number(j.at), reason: String(j.reason || 'unknown') };
-  } catch { return null; }
-}
-
-function remoteRecentlyFailed() {
-  const m = readRemoteDown();
-  if (!m || !Number.isFinite(m.at)) return false;
-  const age = Date.now() - m.at;
-  return age >= 0 && age < DOWN_COOLDOWN_MS;
-}
-
-function fetchVectorRemote(text, brain) {
-  // Cheapest possible gate, before config parsing or a vault read.
-  if (remoteRecentlyFailed()) return null;
-  const cfg = remoteEmbedConfig(brain);
-  if (!cfg) return null;
-  try {
-    // The token goes in a curl CONFIG on stdin, never in argv. On 2026-08-21 passing it with -H
-    // put it in the command line, a curl failure echoed the whole command line, and the token
-    // landed in a transcript and had to be rotated. argv is readable by other processes anyway.
-    const conf = 'header = "content-type: application/json"' + '\n'
-      + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
-      + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
-      + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
-      + 'url = "' + cfg.url + '/embed"' + '\n'
-      + 'request = "POST"' + '\n'
-      + 'data-binary = "' + JSON.stringify({ text }).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
-      + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 6' + '\n';
-    const out = curlRemote(conf, 5000, cfg);
-    const parsedOne = JSON.parse(out || '{}');
-    if (parsedOne.v) LAST_SERVER_V = parsedOne.v;
-    const v = parsedOne.vector;
-    if (Array.isArray(v)) {
-      // Back on the network: clear the mark so recall recovers on this turn, not in ten minutes.
-      try { unlinkSync(REMOTE_DOWN); } catch { /* was not marked */ }
-      return v;
-    }
-    // Reached the server and got something that was not a vector. Almost always auth: a 401 body
-    // parses fine and simply has no `vector`. Worth distinguishing, because "server unreachable"
-    // and "token rejected" need completely different fixes.
-    // Rate limited is a busy server, not a bad token, and must not put it behind the 3 minute down mark.
-    if (parsedOne.error === 'too many requests') { RATE_LIMITED = true; return null; }
-    if (parsedOne.error === 'unauthorized') forgetCachedToken();
-    markRemoteDown('server answered without a vector, likely an expired or wrong token');
-    return null;
-  } catch (e) {
-    markRemoteDown('embed failed: ' + curlWhy(e));
-    return null;
-  }
-}
-
-// Ask the server for MANY vectors in one round trip.
-//
-// Chunking a long prompt made this hook issue one call per chunk. Measured from a laptop client on a
-// real prompt: 8 calls, 273ms of actual server work, 2083ms of wall clock. About 226ms per call
-// was pure round-trip overhead, so a long prompt went from ~130ms to over two seconds before the
-// reply started. The model was never the cost; the round trips were.
-//
-// The local daemon on 8477 has no batch route and does not need one: it is loopback and answers
-// in about 4ms, so looping there costs nothing worth engineering around.
-function fetchVectorsRemote(texts, brain) {
-  if (remoteRecentlyFailed()) return null;
-  const cfg = remoteEmbedConfig(brain);
-  if (!cfg) return null;
-  try {
-    const conf = 'header = "content-type: application/json"' + '\n'
-      + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
-      + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
-      + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
-      + 'url = "' + cfg.url + '/embed"' + '\n'
-      + 'request = "POST"' + '\n'
-      + 'data-binary = "' + JSON.stringify({ texts }).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
-      + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 9' + '\n';
-    const out = curlRemote(conf, 9000, cfg);
-    const parsed = JSON.parse(out || '{}');
-    if (parsed.v) LAST_SERVER_V = parsed.v;
-    const vs = parsed.vectors;
-    if (Array.isArray(vs) && vs.length) {
-      try { unlinkSync(REMOTE_DOWN); } catch { /* was not marked */ }
-      return vs;
-    }
-    if (parsed.error === 'too many requests') { RATE_LIMITED = true; return null; }
-    if (parsed.error === 'unauthorized') forgetCachedToken();
-    markRemoteDown('server answered without vectors, likely an expired or wrong token');
-    return null;
-  } catch (e) {
-    markRemoteDown('batch embed failed: ' + curlWhy(e));
-    return null;
-  }
-}
-
-// Ask the server for the ANSWER instead of for vectors.
-//
-// The owner, 2026-08-22: "the brain is on the server twenty four seven, and every other agent has to
-// access the brain, and they go through the server." This is the read path of that. The machine
-// sends its prompt and its prepared chunks; the server matches against the index it owns and
-// returns ranked memories. Nothing about the index needs to exist on this machine.
-//
-// Verified 2026-08-22 across all 41 eval prompts: identical to local matching, same order, on
-// every one.
-//
-// NULL MEANS "FALL BACK", NEVER "NOTHING MATCHED". Those two are completely different and
-// confusing them would silently blank the brain: an empty ranked list from a healthy server is a
-// real answer, while null means this machine could not ask and must score locally instead.
-//
-// A bad RESPONSE does not mark the server down, only a failure to reach it does. A 400 from a
-// healthy server is a bug in this file, and disabling remote embedding for ten minutes because of
-// it would turn a small bug into an outage.
-// Tell the server which memories this turn used, so ONE machine can show all of them.
-//
-// The owner, 2026-09-15: "can you check if its working, because the other machine is on and
-// recalling". It was, and the map called it idle: every machine wrote its recall log to its own
-// disk and nothing collected them. This is the fix, and it rides the one channel every machine
-// already has, including the one the office proxy has cut off from GitHub.
-//
-// DETACHED AND UNWAITED, on purpose. This runs on every turn of every session. A hook that
-// blocks a prompt to file a statistic has its priorities backwards, so the child is spawned
-// with stdio ignored and unref'd: if the server is down, slow, or on the far side of a dead
-// relay, nothing here notices and the turn is already gone.
-function postPulse(hits, brain) {
-  if (!hits.length) return;
-  postJson('/pulse', { at: Date.now(), host: hostname(), slugs: hits.map((h) => h.slug), how: hits.map((h) => h.how) }, brain);
-}
-
-function postJson(route, body, brain) {
-  try {
-    const cfg = remoteEmbedConfig(brain);
-    if (!cfg) return;
-    const payload = JSON.stringify(body);
-    const conf = 'header = "content-type: application/json"' + '\n'
-      + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
-      + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
-      + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
-      + 'url = "' + cfg.url + route + '"' + '\n'
-      + 'request = "POST"' + '\n'
-      + 'data-binary = "' + payload.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
-      + 'silent' + '\n' + 'output = "' + (process.platform === 'win32' ? 'NUL' : '/dev/null') + '"' + '\n'
-      + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 6' + '\n';
-    // CONFIG IN A FILE, NOT ON A PIPE. The first version wrote the config to an unref'd child's
-    // stdin and returned immediately. That never delivered: on 2026-09-15 the locked-down client machine
-    // ran the hook live, recall succeeded through the server with 5 hits IN THE SAME PROCESS, and
-    // no pulse ever arrived, while a hand-typed POST from the same machine returned ok. So the
-    // transport was fine and the pattern was not: stdin is written asynchronously and the hook
-    // process exits before the bytes reach the child.
-    //
-    // A file is on disk before curl is spawned, so there is nothing left to deliver and the exit
-    // cannot race it. Detached so the child outlives this process, which is the whole point.
-    const dir = join(brain, '.pulse-tmp');
-    try { mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
-    // Sweep anything older than five minutes. curl cannot delete its own config, so the previous
-    // run's file is cleaned by this one: self-healing, and it never grows.
+    const t0 = Date.now();
     try {
-      const cutoff = Date.now() - 5 * 60 * 1000;
-      for (const f of readdirSync(dir)) {
-        const full = join(dir, f);
-        try { if (statSync(full).mtimeMs < cutoff) unlinkSync(full); } catch { /* raced */ }
-      }
-    } catch { /* sweeping is best effort */ }
-    const file = join(dir, 'p' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.conf');
-    writeFileSync(file, conf, { encoding: 'utf8', mode: 0o600 });
-    const child = spawn('curl', ['-K', file], { stdio: 'ignore', windowsHide: true, detached: true });
-    child.on('error', () => { /* no curl, no problem */ });
-    child.unref();
-  } catch { /* never break a turn to file a statistic */ }
+        return execFileSync('curl', ['-K', '-'], {
+            input: conf, encoding: 'utf8', windowsHide: true, timeout: timeoutMs, stdio: ['pipe', 'pipe', 'ignore'],
+        });
+    }
+    catch (e) {
+        const inConnectPhase = typeof e.status === 'number' && Date.now() - t0 < ((cfg && cfg.ct) || 1) * 1000 + 1000;
+        const leftMs = HOOK_LIMIT_MS - HOOK_MARGIN_MS - (Date.now() - HOOK_STARTED);
+        const leftSec = Math.floor(leftMs / 1000);
+        if (!inConnectPhase || !(cfg && cfg.connectTo) || leftSec < 1)
+            throw e;
+        const retry = conf
+            .replace(/connect-timeout = \d+/, 'connect-timeout = ' + Math.min(cfg.ct, leftSec))
+            .replace(/max-time = \d+/, 'max-time = ' + leftSec);
+        return execFileSync('curl', ['-K', '-'], {
+            input: retry, encoding: 'utf8', windowsHide: true, timeout: Math.min(timeoutMs, leftMs), stdio: ['pipe', 'pipe', 'ignore'],
+        });
+    }
 }
-
-/* DOES THIS MACHINE HOLD THE MEMORIES AT ALL. The owner, 2026-09-21: "local recall, and local brain copy
-   is not an option." Every machine except the host now has hooks and tools and no memory/ at all, so
-   a recall that returns slugs leaves it one round trip per memory away from the thing it needs, 216
-   ms each, and an agent in a hurry answers from the description instead. On the host the files are
-   right there and a path is cheaper than a copy of the text, so this decides per machine rather than
-   being a setting anyone has to remember. */
+function curlWhy(e) {
+    if (e instanceof SyntaxError)
+        return 'the server answered with something that is not JSON';
+    if (e && e.code === 'ENOENT')
+        return 'curl not found on this machine';
+    if (e && e.code === 'ETIMEDOUT')
+        return 'the hook stopped waiting for curl';
+    const reasons = {
+        6: 'could not resolve the server name',
+        7: 'could not connect (refused, or no route)',
+        28: 'timed out (connect or answer)',
+        35: 'TLS handshake failed',
+        52: 'the server closed the connection with no answer',
+        56: 'the connection was reset while receiving',
+        60: 'server certificate not trusted',
+        77: 'could not read the CA certificate file',
+    };
+    const status = e && e.status;
+    return typeof status === 'number' ? (reasons[status] || 'curl exit ' + status) : 'unknown failure';
+}
+function readRemoteDown() {
+    try {
+        const raw = readFileSync(REMOTE_DOWN, 'utf8').trim();
+        if (/^\d+$/.test(raw))
+            return { at: Number(raw), reason: 'unknown (written before reasons were recorded)' };
+        const j = JSON.parse(raw);
+        return { at: Number(j.at), reason: String(j.reason || 'unknown') };
+    }
+    catch {
+        return null;
+    }
+}
+function remoteRecentlyFailed() {
+    const m = readRemoteDown();
+    if (!m || !Number.isFinite(m.at))
+        return false;
+    const age = Date.now() - m.at;
+    return age >= 0 && age < DOWN_COOLDOWN_MS;
+}
+function fetchVectorRemote(text, brain) {
+    if (remoteRecentlyFailed())
+        return null;
+    const cfg = remoteEmbedConfig(brain);
+    if (!cfg)
+        return null;
+    try {
+        const conf = 'header = "content-type: application/json"' + '\n'
+            + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
+            + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
+            + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
+            + 'url = "' + cfg.url + '/embed"' + '\n'
+            + 'request = "POST"' + '\n'
+            + 'data-binary = "' + JSON.stringify({ text }).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
+            + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 6' + '\n';
+        const out = curlRemote(conf, 5000, cfg);
+        const parsedOne = JSON.parse(out || '{}');
+        if (parsedOne.v)
+            LAST_SERVER_V = parsedOne.v;
+        const v = parsedOne.vector;
+        if (Array.isArray(v)) {
+            try {
+                unlinkSync(REMOTE_DOWN);
+            }
+            catch { }
+            return v;
+        }
+        if (parsedOne.error === 'too many requests') {
+            RATE_LIMITED = true;
+            return null;
+        }
+        if (parsedOne.error === 'unauthorized')
+            forgetCachedToken();
+        markRemoteDown('server answered without a vector, likely an expired or wrong token');
+        return null;
+    }
+    catch (e) {
+        markRemoteDown('embed failed: ' + curlWhy(e));
+        return null;
+    }
+}
+function fetchVectorsRemote(texts, brain) {
+    if (remoteRecentlyFailed())
+        return null;
+    const cfg = remoteEmbedConfig(brain);
+    if (!cfg)
+        return null;
+    try {
+        const conf = 'header = "content-type: application/json"' + '\n'
+            + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
+            + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
+            + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
+            + 'url = "' + cfg.url + '/embed"' + '\n'
+            + 'request = "POST"' + '\n'
+            + 'data-binary = "' + JSON.stringify({ texts }).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
+            + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 9' + '\n';
+        const out = curlRemote(conf, 9000, cfg);
+        const parsed = JSON.parse(out || '{}');
+        if (parsed.v)
+            LAST_SERVER_V = parsed.v;
+        const vs = parsed.vectors;
+        if (Array.isArray(vs) && vs.length) {
+            try {
+                unlinkSync(REMOTE_DOWN);
+            }
+            catch { }
+            return vs;
+        }
+        if (parsed.error === 'too many requests') {
+            RATE_LIMITED = true;
+            return null;
+        }
+        if (parsed.error === 'unauthorized')
+            forgetCachedToken();
+        markRemoteDown('server answered without vectors, likely an expired or wrong token');
+        return null;
+    }
+    catch (e) {
+        markRemoteDown('batch embed failed: ' + curlWhy(e));
+        return null;
+    }
+}
+function postPulse(hits, brain) {
+    if (!hits.length)
+        return;
+    postJson('/pulse', { at: Date.now(), host: hostname(), slugs: hits.map((h) => h.slug), how: hits.map((h) => h.how) }, brain);
+}
+function postJson(route, body, brain) {
+    try {
+        const cfg = remoteEmbedConfig(brain);
+        if (!cfg)
+            return;
+        const payload = JSON.stringify(body);
+        const conf = 'header = "content-type: application/json"' + '\n'
+            + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
+            + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
+            + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
+            + 'url = "' + cfg.url + route + '"' + '\n'
+            + 'request = "POST"' + '\n'
+            + 'data-binary = "' + payload.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
+            + 'silent' + '\n' + 'output = "' + (process.platform === 'win32' ? 'NUL' : '/dev/null') + '"' + '\n'
+            + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 6' + '\n';
+        const dir = join(brain, '.pulse-tmp');
+        try {
+            mkdirSync(dir, { recursive: true });
+        }
+        catch { }
+        try {
+            const cutoff = Date.now() - 5 * 60 * 1000;
+            for (const f of readdirSync(dir)) {
+                const full = join(dir, f);
+                try {
+                    if (statSync(full).mtimeMs < cutoff)
+                        unlinkSync(full);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        const file = join(dir, 'p' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.conf');
+        writeFileSync(file, conf, { encoding: 'utf8', mode: 0o600 });
+        const child = spawn('curl', ['-K', file], { stdio: 'ignore', windowsHide: true, detached: true });
+        child.on('error', () => { });
+        child.unref();
+    }
+    catch { }
+}
 function holdsMemoriesLocally(brain) {
-  try { return readdirSync(join(brain, 'memory')).some((f) => f.endsWith('.md') && f !== 'MEMORY.md'); }
-  catch { return false; }
+    try {
+        return readdirSync(join(brain, 'memory')).some((f) => f.endsWith('.md') && f !== 'MEMORY.md');
+    }
+    catch {
+        return false;
+    }
 }
-
-/* THE SAME RECALL ON A LOCAL INSTALL (2026-09-26). With no brain server, the hook used to rank with a
-   plain top 5 of its own, so a client got a different recall from the one measured. The local daemon
-   now runs the server's own code (tools/recall-core.mjs) behind /recall, so this asks it first and falls
-   back to the local top 5 only when the daemon is down, older than the route, or serving another brain. */
 function fetchRecallLocal(prompt, queries, brain, parts = 0, contextIndex = -1) {
-  // A missing marker is not proof the daemon is down: on 2026-10-31 it was gone all day while the daemon
-  // answered, because a session start that found the daemon busy deleted it. Ask the daemon itself.
-  if (!existsSync(ALIVE) && daemonState(brain) !== 'up') return null;
-  // Only what is left of the hook's limit: past it Claude Code drops the whole injection, rules included.
-  const budget = Math.min(6, Math.floor(msLeft() / 1000));
-  if (budget < 1) { MISS.local = 'no time was left to ask the local embed server'; return null; }
-  try {
-    const out = execFileSync("curl", [
-      "-s", "--connect-timeout", "1", "--max-time", String(budget), "-X", "POST",
-      "http://127.0.0.1:" + EMBED_PORT + "/recall",
-      "-H", "content-type: application/json",
-      "--data-binary", "@-",
-    ], {
-      input: Buffer.from(JSON.stringify({ brain, prompt: String(prompt).slice(0, 20000), queries, parts, contextIndex }), "utf8"),
-      encoding: "utf8", timeout: budget * 1000 + 500, stdio: ["pipe", "pipe", "ignore"],
-    });
-    const parsed = JSON.parse(out || "{}");
-    if (Array.isArray(parsed.ranked)) return parsed.ranked;
-    MISS.local = 'the local embed server answered without a result (' + String(parsed.error || 'no ranked list').slice(0, 60) + ')';
-    return null;
-  } catch { MISS.local = 'the local embed server did not answer its recall within ' + budget + ' s'; return null; }
+    if (!existsSync(ALIVE) && daemonState(brain) !== 'up')
+        return null;
+    const budget = Math.min(6, Math.floor(msLeft() / 1000));
+    if (budget < 1) {
+        MISS.local = 'no time was left to ask the local embed server';
+        return null;
+    }
+    try {
+        const out = execFileSync("curl", [
+            "-s", "--connect-timeout", "1", "--max-time", String(budget), "-X", "POST",
+            "http://127.0.0.1:" + EMBED_PORT + "/recall",
+            "-H", "content-type: application/json",
+            "--data-binary", "@-",
+        ], {
+            input: Buffer.from(JSON.stringify({ brain, prompt: String(prompt).slice(0, 20000), queries, parts, contextIndex }), "utf8"),
+            encoding: "utf8", timeout: budget * 1000 + 500, stdio: ["pipe", "pipe", "ignore"],
+        });
+        const parsed = JSON.parse(out || "{}");
+        if (Array.isArray(parsed.ranked))
+            return parsed.ranked;
+        MISS.local = 'the local embed server answered without a result (' + String(parsed.error || 'no ranked list').slice(0, 60) + ')';
+        return null;
+    }
+    catch {
+        MISS.local = 'the local embed server did not answer its recall within ' + budget + ' s';
+        return null;
+    }
 }
-
-// The server answered, but from its keyword channel alone (its embedder failed or ran out of time), and says why.
 let SERVER_NOTE = '';
 function fetchRecallRemote(prompt, queries, brain, parts = 0, contextIndex = -1) {
-  if (remoteRecentlyFailed()) { MISS.remote = skippedWhy(); return null; }
-  const cfg = remoteEmbedConfig(brain);
-  if (!cfg) { MISS.remote = 'this machine has no brain server address or token'; return null; }
-  const t0 = Date.now();
-  try {
-    const payload = JSON.stringify({
-      prompt: String(prompt).slice(0, 20000),
-      queries,
-      parts,
-      contextIndex,
-      bodies: !holdsMemoriesLocally(brain),
-    });
-    const conf = 'header = "content-type: application/json"' + '\n'
-      + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
-      + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
-      + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
-      + 'url = "' + cfg.url + '/recall"' + '\n'
-      + 'request = "POST"' + '\n'
-      + 'data-binary = "' + payload.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
-      + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 9' + '\n';
-    let parsed = JSON.parse(curlRemote(conf, 9000, cfg) || '{}');
-    // Rate limited is not "down" and not "embed server not running": wait a moment and ask once more,
-    // and if it still refuses, say so. On a laptop client, 2026-09-26, 4 of 10 prompts were refused this way and
-    // the turn showed a misleading note and keyword-only recall over an empty disk.
-    if (parsed.error === 'too many requests') {
-      execFileSync(process.execPath, ['-e', 'setTimeout(()=>{},1200)'], { windowsHide: true });
-      parsed = JSON.parse(curlRemote(conf, 9000, cfg) || '{}');
-      if (parsed.error === 'too many requests') {
-        RATE_LIMITED = true;
-        MISS.remote = 'the brain server refused this turn as rate limited (too many requests from this machine in the last minute), ask again in a minute';
+    if (remoteRecentlyFailed()) {
+        MISS.remote = skippedWhy();
         return null;
-      }
     }
-    if (parsed.v) LAST_SERVER_V = parsed.v;
-    if (!Array.isArray(parsed.ranked)) {
-      MISS.remote = 'the brain server answered without a result (' + String(parsed.error || 'no ranked list').slice(0, 60) + ')';
-      return null;
+    const cfg = remoteEmbedConfig(brain);
+    if (!cfg) {
+        MISS.remote = 'this machine has no brain server address or token';
+        return null;
     }
-    try { unlinkSync(REMOTE_DOWN); } catch { /* was not marked */ }
-    SERVER_NOTE = typeof parsed.note === 'string' ? parsed.note.slice(0, 400) : '';
-    return parsed.ranked;
-  } catch (e) {
-    MISS.remote = remoteFailWhy(e, Date.now() - t0, cfg, 9);
-    markRemoteDown('recall failed: ' + MISS.remote.replace(/^the brain server /, ''));
-    return null;
-  }
+    const t0 = Date.now();
+    try {
+        const payload = JSON.stringify({
+            prompt: String(prompt).slice(0, 20000),
+            queries,
+            parts,
+            contextIndex,
+            bodies: !holdsMemoriesLocally(brain),
+        });
+        const conf = 'header = "content-type: application/json"' + '\n'
+            + 'header = "Authorization: Bearer ' + cfg.token + '"' + '\n'
+            + (cfg.cacert ? 'cacert = "' + cfg.cacert + '"' + '\n' : '')
+            + (cfg.connectTo ? 'connect-to = "' + cfg.connectTo + '"' + '\n' : '')
+            + 'url = "' + cfg.url + '/recall"' + '\n'
+            + 'request = "POST"' + '\n'
+            + 'data-binary = "' + payload.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + '\n'
+            + 'silent' + '\n' + 'connect-timeout = ' + cfg.ct + '\n' + 'max-time = 9' + '\n';
+        let parsed = JSON.parse(curlRemote(conf, 9000, cfg) || '{}');
+        if (parsed.error === 'too many requests') {
+            execFileSync(process.execPath, ['-e', 'setTimeout(()=>{},1200)'], { windowsHide: true });
+            parsed = JSON.parse(curlRemote(conf, 9000, cfg) || '{}');
+            if (parsed.error === 'too many requests') {
+                RATE_LIMITED = true;
+                MISS.remote = 'the brain server refused this turn as rate limited (too many requests from this machine in the last minute), ask again in a minute';
+                return null;
+            }
+        }
+        if (parsed.v)
+            LAST_SERVER_V = parsed.v;
+        if (!Array.isArray(parsed.ranked)) {
+            MISS.remote = 'the brain server answered without a result (' + String(parsed.error || 'no ranked list').slice(0, 60) + ')';
+            return null;
+        }
+        try {
+            unlinkSync(REMOTE_DOWN);
+        }
+        catch { }
+        SERVER_NOTE = typeof parsed.note === 'string' ? parsed.note.slice(0, 400) : '';
+        return parsed.ranked;
+    }
+    catch (e) {
+        MISS.remote = remoteFailWhy(e, Date.now() - t0, cfg, 9);
+        markRemoteDown('recall failed: ' + MISS.remote.replace(/^the brain server /, ''));
+        return null;
+    }
 }
-
-// Notice when the server's index has moved on, and repair in the BACKGROUND.
-//
-// The owner, 2026-08-22: "when there is a version change, because I don't restart my session a lot."
-// He is right that session-start-only is not enough: this very session has been open all day, so
-// a machine could sit stale for days.
-//
-// Three properties this has to have, and the order matters:
-//   1. NEVER make him wait. The turn that notices a change still answers from the index it
-//      already has, and the repair runs detached. Next turn is fresh. Refetching 500KB inside a
-//      per-turn hook would trade a rare staleness problem for a constant latency one.
-//   2. Cost nothing when nothing changed, which is almost every turn. The version rides along on
-//      the embed response that already happens, so there is no extra request, and the local side
-//      is cached on mtime so it is a few stat() calls rather than hashing 500KB.
-//   3. Never fight itself. A marker file stops a second repair starting while one is running.
 const SYNC_LOCK = join(homedir(), '.claude', 'havok-index-syncing');
 let localVersionCache = null;
-
 function localIndexVersion(brain) {
-  const names = ['keywords.json', 'embeddings.json', 'rules.json', 'contact.md', 'feedback.md', 'project.md', 'reference.md', 'user.md', 'translate-system.txt'];
-  const stat = [];
-  for (const n of names) {
-    try { const st = statSync(join(brain, 'index', n)); stat.push(n + ':' + st.size + ':' + Math.floor(st.mtimeMs)); } catch { /* absent */ }
-  }
-  const key = stat.join('|');
-  if (localVersionCache && localVersionCache.key === key) return localVersionCache.version;
-  const whole = createHash('sha256');
-  for (const n of names) {
-    try { whole.update(n + ':' + createHash('sha256').update(readFileSync(join(brain, 'index', n))).digest('hex').slice(0, 16) + '|'); } catch { /* absent */ }
-  }
-  const version = whole.digest('hex').slice(0, 16);
-  localVersionCache = { key, version };
-  return version;
+    const names = ['keywords.json', 'embeddings.json', 'rules.json', 'contact.md', 'feedback.md', 'project.md', 'reference.md', 'user.md', 'translate-system.txt'];
+    const stat = [];
+    for (const n of names) {
+        try {
+            const st = statSync(join(brain, 'index', n));
+            stat.push(n + ':' + st.size + ':' + Math.floor(st.mtimeMs));
+        }
+        catch { }
+    }
+    const key = stat.join('|');
+    if (localVersionCache && localVersionCache.key === key)
+        return localVersionCache.version;
+    const whole = createHash('sha256');
+    for (const n of names) {
+        try {
+            whole.update(n + ':' + createHash('sha256').update(readFileSync(join(brain, 'index', n))).digest('hex').slice(0, 16) + '|');
+        }
+        catch { }
+    }
+    const version = whole.digest('hex').slice(0, 16);
+    localVersionCache = { key, version };
+    return version;
 }
-
 function repairIndexInBackground(serverVersion, brain) {
-  if (!serverVersion) return null;
-  let mine;
-  try { mine = localIndexVersion(brain); } catch { return null; }
-  if (mine === serverVersion) return null;
-
-  // A repair already running is not a reason to start another one. Stale lock after 5 minutes,
-  // so a killed process cannot wedge this permanently.
-  try {
-    const age = Date.now() - Number(readFileSync(SYNC_LOCK, 'utf8').trim());
-    if (age >= 0 && age < 5 * 60 * 1000) return 'already refreshing';
-  } catch { /* no lock */ }
-  try { writeFileSync(SYNC_LOCK, String(Date.now()), 'utf8'); } catch { /* best effort */ }
-
-  try {
-    const child = spawn(process.execPath, [join(brain, 'tools', 'brain-sync.mjs'), '--quiet'], {
-      detached: true, stdio: 'ignore', cwd: brain,
-    });
-    child.unref();
-  } catch { return null; }
-  return 'refreshing';
+    if (!serverVersion)
+        return null;
+    let mine;
+    try {
+        mine = localIndexVersion(brain);
+    }
+    catch {
+        return null;
+    }
+    if (mine === serverVersion)
+        return null;
+    try {
+        const age = Date.now() - Number(readFileSync(SYNC_LOCK, 'utf8').trim());
+        if (age >= 0 && age < 5 * 60 * 1000)
+            return 'already refreshing';
+    }
+    catch { }
+    try {
+        writeFileSync(SYNC_LOCK, String(Date.now()), 'utf8');
+    }
+    catch { }
+    try {
+        const child = spawn(process.execPath, [join(brain, 'tools', 'brain-sync.mjs'), '--quiet'], {
+            detached: true, stdio: 'ignore', cwd: brain,
+        });
+        child.unref();
+    }
+    catch {
+        return null;
+    }
+    return 'refreshing';
 }
-
-// The brain folder this turn resolved, set in main; recovery needs its tools/ and vault-recipients.json.
 let RECOVER_BRAIN = null;
 function markRemoteDown(reason) {
-  // The hook's own deadline ran out before the call: that says nothing about the server.
-  if (/hook deadline reached/.test(String(reason))) return;
-  try {
-    writeFileSync(REMOTE_DOWN, JSON.stringify({ at: Date.now(), reason: reason || 'unknown' }), 'utf8');
-  } catch { /* best effort, a mark that cannot be written just costs a retry next turn */ }
-  // The failed recall is the event that starts recovery (tools/brain-recover.mjs); it does nothing off the brain host.
-  // A rate limit or a bad token is not a down server, and restarting would not fix either.
-  if (RECOVER_BRAIN && !/rate limited|token/i.test(String(reason))) reportFailure('brain', 'pre-turn: ' + String(reason || 'unknown').slice(0, 160), RECOVER_BRAIN);
+    if (/hook deadline reached/.test(String(reason)))
+        return;
+    try {
+        writeFileSync(REMOTE_DOWN, JSON.stringify({ at: Date.now(), reason: reason || 'unknown' }), 'utf8');
+    }
+    catch { }
+    if (RECOVER_BRAIN && !/rate limited|token/i.test(String(reason)))
+        reportFailure('brain', 'pre-turn: ' + String(reason || 'unknown').slice(0, 160), RECOVER_BRAIN);
 }
-
-// Start the local embedder ourselves when it is not running, so semantic recall is on by default
-// on every machine that installed the runtime, with no scheduler and no one keeping a daemon
-// alive by hand. Added 2026-09-05 when a fresh clone of the published engine turned out to run
-// keyword-only forever, because "optional" meant nobody ever started it.
-//
-// Guarded three ways: only if the runtime is installed here, only one spawn per five minutes (a
-// cold model load is about 15s, and every prompt in that window must not fork another), and
-// detached with all stdio ignored so a hook that must finish in milliseconds never waits on it.
-// THIS turn still falls back to the server or to keyword; the next one gets the daemon.
 const EMBED_LOCK = resolve(homedir(), '.claude', 'havok-embed-starting');
 function ensureEmbedDaemon(brain) {
-  try {
-    if (!existsSync(join(brain, 'node_modules', '@xenova', 'transformers'))) return;
-    if (!existsSync(join(brain, 'tools', 'embed-server.mjs'))) return;
     try {
-      const age = Date.now() - Number(readFileSync(EMBED_LOCK, 'utf8').trim());
-      if (age >= 0 && age < 5 * 60 * 1000) return;
-    } catch { /* no lock */ }
-    writeFileSync(EMBED_LOCK, String(Date.now()), 'utf8');
-    const child = spawn(process.execPath, [join(brain, 'tools', 'embed-server.mjs')], { detached: true, stdio: 'ignore', cwd: brain, windowsHide: true });
-    child.unref();
-  } catch { /* best effort, keyword recall still works */ }
+        if (!existsSync(join(brain, 'node_modules', '@xenova', 'transformers')))
+            return;
+        if (!existsSync(join(brain, 'tools', 'embed-server.mjs')))
+            return;
+        try {
+            const age = Date.now() - Number(readFileSync(EMBED_LOCK, 'utf8').trim());
+            if (age >= 0 && age < 5 * 60 * 1000)
+                return;
+        }
+        catch { }
+        writeFileSync(EMBED_LOCK, String(Date.now()), 'utf8');
+        const child = spawn(process.execPath, [join(brain, 'tools', 'embed-server.mjs')], { detached: true, stdio: 'ignore', cwd: brain, windowsHide: true });
+        child.unref();
+    }
+    catch { }
 }
-
-// THE LOCAL ENGINE SERVER (engine 0.4.90): an install that runs the full system for Claude Code (tools/setup-full.mjs)
-// sets brain.json "localServer": true. The server holds the context layers, the decision log and the answers the mod
-// asks for. It is started here, detached and hidden, when the process named in .server-alive.json is gone: no scheduled
-// task and no administrator rights. A start that finds the port taken exits at once. At most one try per 5 minutes.
 const SERVER_LOCK = resolve(homedir(), '.claude', 'havok-server-starting');
 function ensureLocalServer(brain) {
-  try {
-    let cfg = {};
-    try { cfg = JSON.parse(readFileSync(join(brain, 'brain.json'), 'utf8')); } catch { return; }
-    if (cfg.localServer !== true || !existsSync(join(brain, 'tools', 'brain-server.mjs'))) return;
     try {
-      const alive = JSON.parse(readFileSync(join(brain, '.server-alive.json'), 'utf8'));
-      if (alive && Number.isInteger(alive.pid) && alive.pid > 0) { process.kill(alive.pid, 0); return; }
-    } catch { /* no marker, or the process is gone: start one */ }
-    try {
-      const age = Date.now() - Number(readFileSync(SERVER_LOCK, 'utf8').trim());
-      if (age >= 0 && age < 5 * 60 * 1000) return;
-    } catch { /* no lock */ }
-    writeFileSync(SERVER_LOCK, String(Date.now()), 'utf8');
-    const env = { ...process.env, HAVOK_LAYERS_DIR: process.env.HAVOK_LAYERS_DIR || join(brain, 'layers') };
-    const child = spawn(process.execPath, [join(brain, 'tools', 'brain-server.mjs')], { detached: true, stdio: 'ignore', cwd: brain, windowsHide: true, env });
-    child.unref();
-  } catch { /* best effort: recall here does not need the server */ }
+        let cfg = {};
+        try {
+            cfg = JSON.parse(readFileSync(join(brain, 'brain.json'), 'utf8'));
+        }
+        catch {
+            return;
+        }
+        if (cfg.localServer !== true || !existsSync(join(brain, 'tools', 'brain-server.mjs')))
+            return;
+        try {
+            const alive = JSON.parse(readFileSync(join(brain, '.server-alive.json'), 'utf8'));
+            if (alive && Number.isInteger(alive.pid) && alive.pid > 0) {
+                process.kill(alive.pid, 0);
+                return;
+            }
+        }
+        catch { }
+        try {
+            const age = Date.now() - Number(readFileSync(SERVER_LOCK, 'utf8').trim());
+            if (age >= 0 && age < 5 * 60 * 1000)
+                return;
+        }
+        catch { }
+        writeFileSync(SERVER_LOCK, String(Date.now()), 'utf8');
+        const env = { ...process.env, HAVOK_LAYERS_DIR: process.env.HAVOK_LAYERS_DIR || join(brain, 'layers') };
+        const child = spawn(process.execPath, [join(brain, 'tools', 'brain-server.mjs')], { detached: true, stdio: 'ignore', cwd: brain, windowsHide: true, env });
+        child.unref();
+    }
+    catch { }
 }
-
 function fetchVectorSync(text, brain) {
-  // Local daemon first: it is on loopback and answers in milliseconds. Only fall out to the
-  // network when this machine is not running one.
-  if (!existsSync(ALIVE)) { ensureEmbedDaemon(brain); return fetchVectorRemote(text, brain); }
-  try {
-    // Body over STDIN, never as an argv value.
-    //
-    // Passing it with -d put the text through the Windows command line, which mangles
-    // non-ASCII. The same Arabic query sent by argv and by stdin produced vectors with
-    // cosine 0.27 between them, so the daemon was embedding corrupted bytes and silently
-    // defeating the entire reason the multilingual model was chosen. Verified 2026-08-19.
-    const out = execFileSync("curl", [
-      // 2s was the wrong ceiling: with the daemon down, curl burned the FULL timeout on every
-      // single turn, taking the hook from 64ms to 2112ms. That is worse than the problem the
-      // dense channel solves. --connect-timeout fails in milliseconds when nothing is
-      // listening, while --max-time still bounds a slow response from a daemon that IS up.
-      "-s", "--connect-timeout", "1", "--max-time", "3", "-X", "POST",
-      "http://127.0.0.1:" + (process.env.HAVOK_EMBED_PORT || 8477) + "/embed",
-      "-H", "content-type: application/json",
-      "--data-binary", "@-",
-    ], {
-      input: Buffer.from(JSON.stringify({ text }), "utf8"),
-      encoding: "utf8", timeout: 3500, stdio: ["pipe", "pipe", "ignore"],
-    });
-    const v = JSON.parse(out || "{}").vector;
-    // A dead daemon can leave the marker behind: Stop-Process kills it before the exit handler
-    // runs, and that is exactly how it died on 2026-08-21. In that state the marker says alive,
-    // the local call fails, and without this the remote fallback would never be tried at all.
-    if (Array.isArray(v)) return v;
-    ensureEmbedDaemon(brain);
-    return fetchVectorRemote(text, brain);
-  } catch { ensureEmbedDaemon(brain); return fetchVectorRemote(text, brain); }
+    if (!existsSync(ALIVE)) {
+        ensureEmbedDaemon(brain);
+        return fetchVectorRemote(text, brain);
+    }
+    try {
+        const out = execFileSync("curl", [
+            "-s", "--connect-timeout", "1", "--max-time", "3", "-X", "POST",
+            "http://127.0.0.1:" + (process.env.HAVOK_EMBED_PORT || 8477) + "/embed",
+            "-H", "content-type: application/json",
+            "--data-binary", "@-",
+        ], {
+            input: Buffer.from(JSON.stringify({ text }), "utf8"),
+            encoding: "utf8", timeout: 3500, stdio: ["pipe", "pipe", "ignore"],
+        });
+        const v = JSON.parse(out || "{}").vector;
+        if (Array.isArray(v))
+            return v;
+        ensureEmbedDaemon(brain);
+        return fetchVectorRemote(text, brain);
+    }
+    catch {
+        ensureEmbedDaemon(brain);
+        return fetchVectorRemote(text, brain);
+    }
 }
-
-// RUN BY THE BRAIN'S DISPATCHER AS A BACKUP (HAVOK, 2026-11-03): hooks/dispatch.mjs runs this file with --from-plugin
-// only when the mod did not handle the prompt (its handled mark is missing), so it never runs beside the mod's
-// recall. It still stands down while ~/.claude/settings.json holds a hand-written pre-turn entry, which runs it
-// already (removed by the install step once every live session runs the new plugin). Unreadable files count as absent.
 export function pluginEntryStandsDown(home = process.env.HAVOK_HOME || resolve(homedir(), '.claude')) {
-  try {
-    const st = JSON.parse(readFileSync(join(home, 'settings.json'), 'utf8'));
-    const groups = st?.hooks?.UserPromptSubmit;
-    if (Array.isArray(groups) && groups.some((g) => (g?.hooks || []).some((h) => /pre-turn\.mjs/.test(String(h?.command || ''))))) return true;
-  } catch { /* no settings file */ }
-  return false;
+    try {
+        const st = JSON.parse(readFileSync(join(home, 'settings.json'), 'utf8'));
+        const groups = st?.hooks?.UserPromptSubmit;
+        if (Array.isArray(groups) && groups.some((g) => (g?.hooks || []).some((h) => /pre-turn\.mjs/.test(String(h?.command || '')))))
+            return true;
+    }
+    catch { }
+    return false;
 }
-
 const ok = (ctx) => {
-  if (ctx) {
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: ctx },
-    }));
-  }
-  process.exit(0);
+    if (ctx) {
+        process.stdout.write(JSON.stringify({
+            hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: ctx },
+        }));
+    }
+    process.exit(0);
 };
-
-// Recent conversation, for recall only. Never shown to the model, never used for the answer
-// budget: the budget must read what was actually asked, not what was discussed before it.
-//
-// Prefers an explicit `context` on the payload, which is what the eval harness supplies so the
-// behaviour can be tested without a live session. Otherwise it reads the tail of the transcript
-// Claude Code names in the payload.
-//
-// Capped hard. This is a topic hint, not a second prompt, and an unbounded tail would push the
-// question out of the way exactly as a long paste does.
-/* ONLY THE END OF THE TRANSCRIPT IS EVER READ. This used to readFileSync the whole file and split
-   it, under a comment claiming it was "never parsed whole". It was walked backwards, but only after
-   every byte had been read and split. A long conversation's transcript reached 529 MB on
-   2026-09-17 and the hook took 13 to 16 seconds, past its 10 second limit, so Claude Code threw the
-   output away and that conversation got no recall and no reply rules at all, every single turn.
-   Now it reads the last megabyte and grows the window four times over only if that tail held too
-   few messages (one tool result line can be several megabytes of screenshot). Checked against the
-   old function on five real transcripts: identical context every time, 26ms instead of 14s. */
 const TAIL_START = 1 << 20;
 const TAIL_MAX = 64 << 20;
 function tailLines(tp, enough) {
-  const fd = openSync(tp, "r");
-  try {
-    const size = fstatSync(fd).size;
-    for (let want = TAIL_START; ; want *= 4) {
-      const len = Math.min(want, size);
-      const buf = Buffer.alloc(len);
-      readSync(fd, buf, 0, len, size - len);
-      let lines = buf.toString("utf8").split(String.fromCharCode(10));
-      if (len < size) lines = lines.slice(1);
-      lines = lines.filter(Boolean);
-      if (enough(lines) || len >= size || want >= TAIL_MAX) return lines;
+    const fd = openSync(tp, "r");
+    try {
+        const size = fstatSync(fd).size;
+        for (let want = TAIL_START;; want *= 4) {
+            const len = Math.min(want, size);
+            const buf = Buffer.alloc(len);
+            readSync(fd, buf, 0, len, size - len);
+            let lines = buf.toString("utf8").split(String.fromCharCode(10));
+            if (len < size)
+                lines = lines.slice(1);
+            lines = lines.filter(Boolean);
+            if (enough(lines) || len >= size || want >= TAIL_MAX)
+                return lines;
+        }
     }
-  } finally { closeSync(fd); }
+    finally {
+        closeSync(fd);
+    }
 }
-
 function readRecentContext(payload) {
-  try {
-    if (payload && typeof payload.context === "string" && payload.context.trim()) {
-      return payload.context.slice(-CONTEXT_CHARS);
+    try {
+        if (payload && typeof payload.context === "string" && payload.context.trim()) {
+            return payload.context.slice(-CONTEXT_CHARS);
+        }
+        const tp = payload && payload.transcript_path;
+        if (!tp || !existsSync(tp))
+            return "";
+        let msgs = [];
+        tailLines(tp, (lines) => (msgs = recentMessages(lines)).join(" ").length >= CONTEXT_CHARS * 2);
+        return msgs.join(" ").slice(-CONTEXT_CHARS);
     }
-    const tp = payload && payload.transcript_path;
-    if (!tp || !existsSync(tp)) return "";
-    let msgs = [];
-    tailLines(tp, (lines) => (msgs = recentMessages(lines)).join(" ").length >= CONTEXT_CHARS * 2);
-    return msgs.join(" ").slice(-CONTEXT_CHARS);
-  } catch { return ""; }
+    catch {
+        return "";
+    }
 }
 function recentMessages(lines) {
-  const msgs = [];
-  // Newest first, stopping as soon as there is enough.
-  for (let i = lines.length - 1; i >= 0 && msgs.join(" ").length < CONTEXT_CHARS * 2; i -= 1) {
-    let o = null;
-    try { o = JSON.parse(lines[i]); } catch { continue; }
-    const role = o && o.message && o.message.role;
-    if (role !== "user" && role !== "assistant") continue;
-    const c = o.message.content;
-    let text = "";
-    if (typeof c === "string") text = c;
-    else if (Array.isArray(c)) text = c.filter((p) => p && p.type === "text").map((p) => p.text).join(" ");
-    // Folded, too short and harness lines skipped, 400 characters kept: tools/recall-turn.mjs, shared with the server.
-    const m = contextMessage(text);
-    if (m) msgs.unshift(m);
-  }
-  return msgs;
+    const msgs = [];
+    for (let i = lines.length - 1; i >= 0 && msgs.join(" ").length < CONTEXT_CHARS * 2; i -= 1) {
+        let o = null;
+        try {
+            o = JSON.parse(lines[i]);
+        }
+        catch {
+            continue;
+        }
+        const role = o && o.message && o.message.role;
+        if (role !== "user" && role !== "assistant")
+            continue;
+        const c = o.message.content;
+        let text = "";
+        if (typeof c === "string")
+            text = c;
+        else if (Array.isArray(c))
+            text = c.filter((p) => p && p.type === "text").map((p) => p.text).join(" ");
+        const m = contextMessage(text);
+        if (m)
+            msgs.unshift(m);
+    }
+    return msgs;
 }
-
 try {
-  if (process.argv.includes('--from-plugin') && pluginEntryStandsDown()) ok('');
-  const HERE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const marker = (() => {
-    try { return readFileSync(resolve(process.env.HAVOK_HOME || resolve(homedir(), '.claude'), 'havok-brain-path'), 'utf8').trim(); }
-    catch { return null; }
-  })();
-  // A directory is only THIS brain if it carries the artifacts this hook needs. Testing for a
-  //  folder alone was far too loose: four directories on this machine qualified,
-  // including a frozen plugin cache from May and the Claude Code project folder, and two of
-  // them have no rules.json at all. Resolving to one of those silently strips every behaviour
-  // rule while the gate, which checks the brain it sits in rather than the one the hook picks,
-  // keeps reporting healthy. Found by a red-team pass, 2026-08-18.
-  const isBrain = (p) => {
-    try {
-      return !!p && existsSync(join(p, 'memory'))
-        && existsSync(join(p, 'REFLEX.md'));
-    } catch { return false; }
-  };
-  // ORDER MATTERS. The explicit env var first. Then the brain this hook physically lives in,
-  // because install-hook.mjs registered THIS path on purpose. The global marker last: it used to
-  // come second, so a second brain installed on a machine that already had one silently recalled
-  // from the first. Found on 2026-09-05 by cloning the export on the author's own machine.
-  const BRAIN = [process.env.HAVOK_BRAIN, HERE, marker].find(isBrain) || HERE;
-  RECOVER_BRAIN = BRAIN;
-  ensureLocalServer(BRAIN);
-
-  let raw = '';
-  try { raw = readFileSync(0, 'utf8'); } catch { /* no stdin */ }
-  let prompt = '';
-  let payload = {};
-  try { payload = JSON.parse(raw || '{}'); prompt = String(payload.prompt || ''); } catch { prompt = raw; }
-  if (!prompt.trim()) ok('');
-  // A keep-warm ping (hooks/check-keep-warm.mjs) only refreshes the cache; injecting rules and recall into it would
-  // add thousands of tokens to the conversation for nothing.
-  if (prompt.trim() === 'keep-warm ping') ok('');
-  // A background-task or system notification arrives through this hook like a prompt, but it is not a
-  // question: on 2026-09-26 one pulled 40 memories of noise. The rules still go in; recall is skipped.
-  const systemEvent = prompt.trimStart().startsWith('<task-notification>') || prompt.includes('[SYSTEM NOTIFICATION - NOT USER INPUT]');
-
-  // WHAT THE CONVERSATION IS ABOUT, not just what was typed last.
-  //
-  // 2026-09-11: a session deep in an ERP delivery report asked "I need to know who did what
-  // action" and recall returned GitHub Actions, the vault and WhatsApp. The word "action" was the
-  // only thing it had, because recall has only ever seen the current prompt.
-  // the audit log memory, which is literally the memory for who changed what and when,
-  // never appeared.
-  //
-  // A short follow-up carries almost no topic. The topic lives in the messages before it, so the
-  // recent turns are read and used as an ADDITIONAL query rather than replacing the prompt: a
-  // prompt that does name its own subject keeps matching exactly as it did.
-  const recentContext = readRecentContext(payload);
-
-
-  const head = prompt.slice(0, 2000).toLowerCase();
-  const out = [];
-
-  // ---- 1. BUDGET -----------------------------------------------------------------------
-  //
-  // The tier is judged from what the owner asked for, because length is not the real rule. His own
-  // memory: long is allowed when he asks for analysis, a plan, or a decision with tradeoffs.
-  // A flat ceiling would fight exactly the answers he wanted, so depth requests are exempted
-  // from the word count and only kept clean of padding.
-  const DEPTH = /\b(plan|analys|analyz|compare|comparison|tradeoff|trade-off|pros and cons|options|design|architect|audit|review|brainstorm|exhaust|research|investigate|walk me through|explain why|deep dive|strategy|roadmap)\b/;
-  const ACTION = /^(log|add|send|set|update|delete|remove|fix|change|rename|commit|push|run|start|stop|restart|check)\b|\bi (ate|drank|paid|bought|spent|weigh)\b/;
-
-  // No word counts. The owner, 2026-08-07: "I don't want hard limit like number of words, just the
-  // meaning of short." He is right that a number is the wrong instrument. It measures the
-  // symptom, and it is gameable in both directions: padding up to the limit, or truncating an
-  // answer that needed the room. The test below is about whether a sentence earns its place,
-  // which is the actual rule, and it applies identically to a one-line confirmation and to a
-  // full design discussion.
-  // WHOSE brain this is, and the pronoun to use for them.
-  //
-  // These were hardcoded as one name and one pronoun until 2026-09-05, which was invisible here and
-  // obvious the moment a clean export was installed: a brand new brain greeted its owner with
-  // "HOW TO REPLY TO <the owner's name>". Found by running the install, not by reading the file.
-  //
-  // Set HAVOK_OWNER and HAVOK_OWNER_PRONOUN, or brain.json {"owner":"...","pronoun":"..."}.
-  // The default is deliberately neutral rather than a name.
-  let OWNER = process.env.HAVOK_OWNER || "";
-  let PRONOUN = process.env.HAVOK_OWNER_PRONOUN || "";
-  try {
-    const cfg = JSON.parse(readFileSync(join(BRAIN, "brain.json"), "utf8"));
-    OWNER = OWNER || cfg.owner || "";
-    PRONOUN = PRONOUN || cfg.pronoun || "";
-  } catch { /* no config, use the neutral default */ }
-  const WHO = OWNER ? ("TO " + OWNER.toUpperCase()) : "TO THE USER";
-  const THEY = PRONOUN || "they";
-  const CAP = THEY.charAt(0).toUpperCase() + THEY.slice(1);
-
-  let tier;
-  if (DEPTH.test(head)) {
-    tier = CAP + ' asked for depth here, so take the room you need for the substance. The cuts below still apply.';
-  } else if (ACTION.test(head)) {
-    tier = CAP + ' asked you to DO something. Say it is done and give the numbers that changed, plus anything that surprised you while doing it.';
-  } else {
-    tier = CAP + ' asked a question. Answer it and stop.';
-  }
-
-  // The rules are GENERATED, not written here.
-  //
-  // They used to be hardcoded in this file, and were also restated in REFLEX.md,
-  // METHODOLOGIES.md, both CLAUDE.md files and their own feedback memories. Measured
-  // 2026-08-18: "verify" appeared in 7 files, "em dash" in 6. Editing a memory changed nothing,
-  // because the sentence the agent actually read lived here. That is the split-brain the brain
-  // exists to prevent, rebuilt one layer up. the owner: "let's fix this mess, not just patch it."
-  //
-  // Now: a feedback memory carries a `rule:` line, build-index compiles them into
-  // index/rules.json in `rule_order`, and this reads that. One source, one edit, every turn on
-  // every machine. Falls back to the tier line alone if the file is missing, which degrades to
-  // quiet rather than to an agent with no rules and no warning.
-  /* FULL OR SHORT RULES (2026-09-26). The owner: the brain must be cheap enough for a 20 dollar plan
-     and slow local models. The full rules cost about 1,190 tokens a turn; each rule memory also carries
-     a hand-written `rule_short:` (about 440 tokens for all). Tested blind on 24 scenarios, each built to
-     tempt one rule, answered by Gemini 3.8 Flash and graded by Gemini 3.1 Pro: full 23/24, short 23/24.
-     A mechanical cut had failed (it dropped "ask before anything irreversible" and the model sent an
-     email), which is why the short forms are written, not truncated.
-     rulesMode in brain.json: "full", "short", or "auto" (default): full on the first message of a
-     conversation and every 10th, short in between, so the full text is never far back. */
-  let rulesMode = 'auto';
-  try { rulesMode = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8')).rulesMode || 'auto'; } catch { /* default */ }
-  if (process.env.HAVOK_RULES_MODE) rulesMode = process.env.HAVOK_RULES_MODE;
-  let turnNo = 1;
-  const sid = payload && payload.session_id && /^[A-Za-z0-9_-]{6,80}$/.test(String(payload.session_id)) ? String(payload.session_id) : null;
-  if (sid) {
-    const turnFile = join(homedir(), '.claude', 'havok-recall-shown', sid + '.turns');
-    try { turnNo = Number(readFileSync(turnFile, 'utf8')) + 1 || 1; } catch { turnNo = 1; }
-    try { mkdirSync(dirname(turnFile), { recursive: true }); writeFileSync(turnFile, String(turnNo)); } catch { /* counting must never cost the turn its rules */ }
-  }
-  const fullRules = rulesMode === 'full' || (rulesMode === 'auto' && (turnNo % 10) === 1);
-  out.push(
-    fullRules
-      ? 'HOW TO REPLY ' + WHO + '. Generated from the brain, delivered every turn because a rule loaded'
-      : 'HOW TO REPLY ' + WHO + ' (short form; the full text comes every 10th message).',
-    ...(fullRules ? ['once at session start loses to recency by turn fifty.', ''] : []),
-    '1. ' + tier,
-  );
-  let rules = null;
-  try { rules = JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')).rules || []; }
-  catch { rules = null; }
-  // No local copy: ask the server, which owns them. Silence here would strip every behaviour rule
-  // from the turn with nothing on screen to say so.
-  if (!rules || !rules.length) rules = fetchRulesRemote(BRAIN);
-  let rulesFromCache = false;
-  if (!rules || !rules.length) { rules = cachedRules(); rulesFromCache = Boolean(rules); }
-  if (rulesFromCache) out.push('(brain rules from this machine\'s last copy: the brain server did not answer this turn.)');
-  // A topic rule (`when`) is kept only when this message matches it; a bad pattern keeps the rule rather than lose it.
-  const matchesTopic = (r) => { if (!r.when) return true; try { return new RegExp(r.when, 'i').test(prompt); } catch { return true; } };
-  if (rules && rules.length) rules = rules.filter(matchesTopic);
-  if (rules && rules.length) {
-    rules.forEach((r, i) => out.push(`${i + 2}. ${fullRules || !r.short ? r.rule : r.short}`));
-  } else {
-    out.push('(brain rules unavailable: no local index/rules.json and the brain server could not be'
-      + ' reached. You are running with almost no behaviour rules. Tell the owner before answering.)');
-  }
-  // THE PLAN LINE (hooks/plan-rules.mjs; the owner, 2026-11-03: a 20 dollar plan uses less, a large plan can use more).
-  // "plan" in brain.json says how many helpers, which models and how much background work; an install of the public
-  // repository with no setting counts as small. A brain with neither gets no line, so nothing changes for it.
-  try {
-    const { planOf, planLine } = await import('./plan-rules.mjs');
-    let cfg = {};
-    try { cfg = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8')); } catch { /* no settings file */ }
-    let pub = false;
-    try { pub = PUBLIC_NAME.test(JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name); } catch { /* not an install */ }
-    const line = planLine(planOf(cfg, pub));
-    if (line) out.push('', line);
-  } catch { /* the plan line is a help, never a reason to lose the turn */ }
-
-  // ---- 2. RECALL -----------------------------------------------------------------------
-  const idxPath = join(BRAIN, 'index', 'keywords.json');
-  // NOT a gate any more. This used to be `if (existsSync(idxPath))`, which meant a machine holding
-  // no local index got no recall at all, even with a healthy server one round trip away. That is
-  // exactly backwards: those are the machines the server exists for.
-  const idx = existsSync(idxPath) ? JSON.parse(readFileSync(idxPath, 'utf8')) : null;
-  {
-
-    // DENSE CHANNEL, fused with the keyword one rather than replacing it.
-    //
-    // Keyword retrieval cannot reach a paraphrase: "stop writing so much" shares no word with
-    // the reply-length memory, and Arabic script tokenizes to nothing at all because the
-    // tokenizer splits on [^a-z0-9]. Embeddings fix both. Measured on the 40-query eval:
-    // sparse 87.5%, dense 92.5%, fused 92.5%. Fusion does not beat dense alone here and is
-    // kept anyway, because sparse holds the exact-name lookups ("a specific person and a specific vendor")
-    // that dense blurs, and because it still answers when the model is unavailable.
-    //
-    // The vector comes from a resident daemon, never from loading the model here: in-process
-    // load costs 1285ms even warm, against 64ms for this whole hook. Daemon down means
-    // keyword-only, which is a real degradation and is stated in the injection.
-    let denseRanked = [];
-    let denseNote = "";
-    // Set when the SERVER did the matching. The owner, 2026-08-22: "the brain is on the server twenty
-    // four seven, and every other agent has to access the brain, and they go through the server."
-    // When this is set, every local scoring step below is skipped: the answer is already ranked.
-    let serverRanked = null;
-    try {
-      const embPath = join(BRAIN, "index", "embeddings.json");
-      // No longer a gate. A machine that holds no embeddings index must still be able to ask the
-      // server, and gating the whole block on a local file meant exactly the machines the server
-      // exists for could never reach it.
-      const emb = existsSync(embPath) ? JSON.parse(readFileSync(embPath, "utf8")) : null;
-      {
-        // Arabic (translated with the local claude CLI first), long prompts (chunked), mixed short messages (split into
-        // parts) and the conversation as one extra query: tools/recall-turn.mjs, where the measurements behind each step
-        // are kept. Shared with the brain server's POST /recall/turn, so the hook and the mod recall the same way.
-        const prep = prepareQueries(prompt, recentContext, { translate: (t) => translateSync(t, BRAIN) });
-        const { hasArabic, baseQueries, queries, translationFailed } = prep;
-        if (prep.note) denseNote = prep.note;
-
-        // ASK THE SERVER FIRST. It holds the index and does the matching, so one round trip
-        // returns the ranked answer and every scoring step below is skipped.
-        //
-        // The prompt preparation above still happens HERE and not on the server, deliberately:
-        // chunking is pure string work that costs nothing locally, and the Arabic path needs the
-        // claude CLI on this machine. The server receives the already-prepared queries.
-        if (!translationFailed && !systemEvent) serverRanked = fetchRecallRemote(prompt, queries, BRAIN, baseQueries.length - 1, queries.length > baseQueries.length ? baseQueries.length : -1);
-        if (serverRanked && SERVER_NOTE) denseNote = (denseNote ? denseNote + ' ' : '') + SERVER_NOTE;
-        if (!serverRanked && !translationFailed && !systemEvent && holdsMemoriesLocally(BRAIN)) serverRanked = fetchRecallLocal(prompt, queries, BRAIN, baseQueries.length - 1, queries.length > baseQueries.length ? baseQueries.length : -1);
-
-        let vecs = [];
-        if (serverRanked || translationFailed || systemEvent) {
-          // Nothing to do locally. Either the server already answered, or the prompt is Arabic and
-          // the translation failed, so there is nothing worth embedding. A system event skips recall on purpose:
-          // embedding it anyway printed a false "semantic recall missed" note (audit 2026-11-01).
-        } else if (!emb) {
-          denseNote = semanticMissNote(BRAIN) + ' This machine holds no embeddings index of its own to fall back on.';
-        } else if (msLeft() < 4000) {
-          // Not enough of the hook's limit left for another network try: past the limit Claude Code drops the
-          // whole injection, rules included, which is worse than keyword recall said plainly.
-        } else if (queries.length > 1 && !existsSync(ALIVE)) {
-          // No local daemon, so every chunk would be its own network round trip. One request.
-          const batch = fetchVectorsRemote(queries, BRAIN);
-          if (batch) vecs = batch.filter((v) => Array.isArray(v) && v.length === emb.dims);
-        } else {
-          for (const q of queries) {
-            const v = fetchVectorSync(q, BRAIN);
-            if (v && v.length === emb.dims) vecs.push(v);
-            // One dead call means the server went away mid-prompt; stop rather than pay for the rest.
-            else if (!v) break;
-          }
+    if (process.argv.includes('--from-plugin') && pluginEntryStandsDown())
+        ok('');
+    const HERE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const marker = (() => {
+        try {
+            return readFileSync(resolve(process.env.HAVOK_HOME || resolve(homedir(), '.claude'), 'havok-brain-path'), 'utf8').trim();
         }
-        const vec = vecs[0] || null;
-        if (vecs.length) {
-          // MAX over chunks, not mean. Taking the best chunk is the entire point: a mean would
-          // reintroduce exactly the dilution this replaced.
-          const best = new Float64Array(emb.slugs.length).fill(-Infinity);
-          for (const q of vecs) {
-            for (let i2 = 0; i2 < emb.slugs.length; i2++) {
-              const v = emb.vectors[i2];
-              let dot = 0;
-              for (let k = 0; k < v.length; k++) dot += q[k] * v[k];
-              if (dot > best[i2]) best[i2] = dot;
+        catch {
+            return null;
+        }
+    })();
+    const isBrain = (p) => {
+        try {
+            return !!p && existsSync(join(p, 'memory'))
+                && existsSync(join(p, 'REFLEX.md'));
+        }
+        catch {
+            return false;
+        }
+    };
+    const BRAIN = [process.env.HAVOK_BRAIN, HERE, marker].find(isBrain) || HERE;
+    RECOVER_BRAIN = BRAIN;
+    ensureLocalServer(BRAIN);
+    let raw = '';
+    try {
+        raw = readFileSync(0, 'utf8');
+    }
+    catch { }
+    let prompt = '';
+    let payload = {};
+    try {
+        payload = JSON.parse(raw || '{}');
+        prompt = String(payload.prompt || '');
+    }
+    catch {
+        prompt = raw;
+    }
+    if (!prompt.trim())
+        ok('');
+    if (prompt.trim() === 'keep-warm ping')
+        ok('');
+    const systemEvent = prompt.trimStart().startsWith('<task-notification>') || prompt.includes('[SYSTEM NOTIFICATION - NOT USER INPUT]');
+    const recentContext = readRecentContext(payload);
+    const head = prompt.slice(0, 2000).toLowerCase();
+    const out = [];
+    const DEPTH = /\b(plan|analys|analyz|compare|comparison|tradeoff|trade-off|pros and cons|options|design|architect|audit|review|brainstorm|exhaust|research|investigate|walk me through|explain why|deep dive|strategy|roadmap)\b/;
+    const ACTION = /^(log|add|send|set|update|delete|remove|fix|change|rename|commit|push|run|start|stop|restart|check)\b|\bi (ate|drank|paid|bought|spent|weigh)\b/;
+    let OWNER = process.env.HAVOK_OWNER || "";
+    let PRONOUN = process.env.HAVOK_OWNER_PRONOUN || "";
+    try {
+        const cfg = JSON.parse(readFileSync(join(BRAIN, "brain.json"), "utf8"));
+        OWNER = OWNER || cfg.owner || "";
+        PRONOUN = PRONOUN || cfg.pronoun || "";
+    }
+    catch { }
+    const WHO = OWNER ? ("TO " + OWNER.toUpperCase()) : "TO THE USER";
+    const THEY = PRONOUN || "they";
+    const CAP = THEY.charAt(0).toUpperCase() + THEY.slice(1);
+    let tier;
+    if (DEPTH.test(head)) {
+        tier = CAP + ' asked for depth here, so take the room you need for the substance. The cuts below still apply.';
+    }
+    else if (ACTION.test(head)) {
+        tier = CAP + ' asked you to DO something. Say it is done and give the numbers that changed, plus anything that surprised you while doing it.';
+    }
+    else {
+        tier = CAP + ' asked a question. Answer it and stop.';
+    }
+    let rulesMode = 'auto';
+    try {
+        rulesMode = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8')).rulesMode || 'auto';
+    }
+    catch { }
+    if (process.env.HAVOK_RULES_MODE)
+        rulesMode = process.env.HAVOK_RULES_MODE;
+    let turnNo = 1;
+    const sid = payload && payload.session_id && /^[A-Za-z0-9_-]{6,80}$/.test(String(payload.session_id)) ? String(payload.session_id) : null;
+    if (sid) {
+        const turnFile = join(homedir(), '.claude', 'havok-recall-shown', sid + '.turns');
+        try {
+            turnNo = Number(readFileSync(turnFile, 'utf8')) + 1 || 1;
+        }
+        catch {
+            turnNo = 1;
+        }
+        try {
+            mkdirSync(dirname(turnFile), { recursive: true });
+            writeFileSync(turnFile, String(turnNo));
+        }
+        catch { }
+    }
+    const fullRules = rulesMode === 'full' || (rulesMode === 'auto' && (turnNo % 10) === 1);
+    out.push(fullRules
+        ? 'HOW TO REPLY ' + WHO + '. Generated from the brain, delivered every turn because a rule loaded'
+        : 'HOW TO REPLY ' + WHO + ' (short form; the full text comes every 10th message).', ...(fullRules ? ['once at session start loses to recency by turn fifty.', ''] : []), '1. ' + tier);
+    let rules = null;
+    try {
+        rules = JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')).rules || [];
+    }
+    catch {
+        rules = null;
+    }
+    if (!rules || !rules.length)
+        rules = fetchRulesRemote(BRAIN);
+    let rulesFromCache = false;
+    if (!rules || !rules.length) {
+        rules = cachedRules();
+        rulesFromCache = Boolean(rules);
+    }
+    if (rulesFromCache)
+        out.push('(brain rules from this machine\'s last copy: the brain server did not answer this turn.)');
+    const matchesTopic = (r) => { if (!r.when)
+        return true; try {
+        return new RegExp(r.when, 'i').test(prompt);
+    }
+    catch {
+        return true;
+    } };
+    if (rules && rules.length)
+        rules = rules.filter(matchesTopic);
+    if (rules && rules.length) {
+        rules.forEach((r, i) => out.push(`${i + 2}. ${fullRules || !r.short ? r.rule : r.short}`));
+    }
+    else {
+        out.push('(brain rules unavailable: no local index/rules.json and the brain server could not be'
+            + ' reached. You are running with almost no behaviour rules. Tell the person before answering.)');
+    }
+    try {
+        const { planOf, planLine } = await import('./plan-rules.mjs');
+        let cfg = {};
+        try {
+            cfg = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8'));
+        }
+        catch { }
+        let pub = false;
+        try {
+            pub = PUBLIC_NAME.test(JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name);
+        }
+        catch { }
+        const line = planLine(planOf(cfg, pub));
+        if (line)
+            out.push('', line);
+    }
+    catch { }
+    const idxPath = join(BRAIN, 'index', 'keywords.json');
+    const idx = existsSync(idxPath) ? JSON.parse(readFileSync(idxPath, 'utf8')) : null;
+    {
+        let denseRanked = [];
+        let denseNote = "";
+        let serverRanked = null;
+        try {
+            const embPath = join(BRAIN, "index", "embeddings.json");
+            const emb = existsSync(embPath) ? JSON.parse(readFileSync(embPath, "utf8")) : null;
+            {
+                const prep = prepareQueries(prompt, recentContext, { translate: (t) => translateSync(t, BRAIN) });
+                const { hasArabic, baseQueries, queries, translationFailed } = prep;
+                if (prep.note)
+                    denseNote = prep.note;
+                if (!translationFailed && !systemEvent)
+                    serverRanked = fetchRecallRemote(prompt, queries, BRAIN, baseQueries.length - 1, queries.length > baseQueries.length ? baseQueries.length : -1);
+                if (serverRanked && SERVER_NOTE)
+                    denseNote = (denseNote ? denseNote + ' ' : '') + SERVER_NOTE;
+                if (!serverRanked && !translationFailed && !systemEvent && holdsMemoriesLocally(BRAIN))
+                    serverRanked = fetchRecallLocal(prompt, queries, BRAIN, baseQueries.length - 1, queries.length > baseQueries.length ? baseQueries.length : -1);
+                let vecs = [];
+                if (serverRanked || translationFailed || systemEvent) {
+                }
+                else if (!emb) {
+                    denseNote = semanticMissNote(BRAIN) + ' This machine holds no embeddings index of its own to fall back on.';
+                }
+                else if (msLeft() < 4000) {
+                }
+                else if (queries.length > 1 && !existsSync(ALIVE)) {
+                    const batch = fetchVectorsRemote(queries, BRAIN);
+                    if (batch)
+                        vecs = batch.filter((v) => Array.isArray(v) && v.length === emb.dims);
+                }
+                else {
+                    for (const q of queries) {
+                        const v = fetchVectorSync(q, BRAIN);
+                        if (v && v.length === emb.dims)
+                            vecs.push(v);
+                        else if (!v)
+                            break;
+                    }
+                }
+                const vec = vecs[0] || null;
+                if (vecs.length) {
+                    const best = new Float64Array(emb.slugs.length).fill(-Infinity);
+                    for (const q of vecs) {
+                        for (let i2 = 0; i2 < emb.slugs.length; i2++) {
+                            const v = emb.vectors[i2];
+                            let dot = 0;
+                            for (let k = 0; k < v.length; k++)
+                                dot += q[k] * v[k];
+                            if (dot > best[i2])
+                                best[i2] = dot;
+                        }
+                    }
+                    denseRanked = emb.slugs
+                        .map((s, i2) => [s, best[i2]])
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 20);
+                }
+                else if (!vec && !hasArabic && !serverRanked && !systemEvent) {
+                    denseNote = semanticMissNote(BRAIN);
+                }
+                const refreshing = holdsMemoriesLocally(BRAIN) ? repairIndexInBackground(LAST_SERVER_V, BRAIN) : null;
+                if (refreshing === 'refreshing') {
+                    denseNote = (denseNote ? denseNote + ' ' : '')
+                        + 'NOTE: this machine index was behind the server and is refreshing in the background. '
+                        + 'The memories below came from the older copy; ask again if something looks missing.';
+                }
             }
-          }
-          denseRanked = emb.slugs
-            .map((s, i2) => [s, best[i2]])
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 20);
-        // !serverRanked matters. When the SERVER did the matching, vecs is empty by design because
-        // nothing was embedded locally, and without this guard that emptiness read as failure: every
-        // server-answered turn carried "semantic recall is OFF" while simultaneously delivering
-        // memories tagged [both], which only the server produces. Caught 2026-08-22 by reading the
-        // hook's own output in a live turn. A false degradation warning is worse than none: it tells
-        // the agent not to trust recall that is in fact working perfectly.
-        } else if (!vec && !hasArabic && !serverRanked && !systemEvent) {
-          denseNote = semanticMissNote(BRAIN);
         }
-
-        // The embed call already told us the server's index version, for free. If it has moved on,
-        // start the repair in the background and carry on answering with what we have. The next
-        // turn gets the fresh index. Nothing here blocks and nothing here can fail loudly.
-        const refreshing = holdsMemoriesLocally(BRAIN) ? repairIndexInBackground(LAST_SERVER_V, BRAIN) : null;
-        if (refreshing === 'refreshing') {
-          denseNote = (denseNote ? denseNote + ' ' : '')
-            + 'NOTE: this machine index was behind the server and is refreshing in the background. '
-            + 'The memories below came from the older copy; ask again if something looks missing.';
+        catch (e) {
+            denseNote = "NOTE: semantic recall missed this turn because of an error inside the recall hook (" + String((e && e.message) || e).slice(0, 120) + "). Keyword only.";
         }
-      }
-    } catch (e) { denseNote = "NOTE: semantic recall missed this turn because of an error inside the recall hook (" + String((e && e.message) || e).slice(0, 120) + "). Keyword only."; }
-    // Recall reads the FULL prompt, not the 2000-char head used for the tier decision.
-        //
-        // Reusing  here silently destroyed recall for any prompt where the question came
-        // after a paste. Verified: "how do i log creatine" preceded by 4000 characters of filler
-        // returned NOTHING, while the same question first returned the right memory at rank 1.
-        // the owner pastes logs, emails and bank messages constantly, so this was not a rare shape.
-        // Capped well above any real prompt purely so a pathological paste cannot dominate.
-        // The context words join the keyword channel. "who did what action" alone tokenizes to
-        // action, which is why a GitHub Actions memory won. With the surrounding ERP report in
-        // scope, the ERP terms compete on their own merit.
         const sparseSource = recentContext ? (recentContext + " " + prompt) : prompt;
         const words = new Set(qterms(sparseSource.slice(0, 20000).toLowerCase()));
-    const score = new Map();
-    for (const w of words) {
-      const slugs = idx ? idx.terms[w] : null;
-      if (!slugs) continue;
-      const weight = 1 / slugs.length; // rarer term, stronger signal
-      for (const s of slugs) score.set(s, (score.get(s) || 0) + weight);
-    }
-    // 0.10 measured, not chosen, and RE-measured after the tokenizer changed.
-    // tools/eval-recall.mjs sweep on 2026-08-18, current corpus: 0.34 and 0.33 both score
-    // 85.0%, 0.10 scores 87.5%, 0.05 stays 87.5%. An earlier version of this comment quoted
-    // 75.0% and 77.5% and claimed the curve was flat below 0.33. Those numbers were taken
-    // BEFORE the tokenizer fixes (2-char minimum, stemming, no DF cap) and were never
-    // re-run when the threshold moved, so the comment was justifying the value with evidence
-    // that no longer existed. Re-run the sweep whenever the tokenizer or the corpus changes.
-    // Biased toward recall: a false positive costs one line the agent may ignore, a false
-    // negative is answering from stale memory while the brain held the answer.
-    const sparseRanked = [...score.entries()]
-      .filter(([, v]) => v >= Number(process.env.RECALL_MIN || 0.10))
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 20);
-
-    // Reciprocal rank fusion at equal weight. A sweep of 1:1, 1:2, 1:3, 2:1 and 3:1 over the
-    // 40-query eval was flat at 92.5%, except 3:1 which dropped to 90.0%, so weighting buys
-    // nothing here and equal is the honest default.
-    const RRF_K = 60;
-    const fused = new Map();
-    sparseRanked.forEach(([slug], r) => fused.set(slug, (fused.get(slug) || 0) + 1 / (RRF_K + r + 1)));
-    denseRanked.forEach(([slug], r) => fused.set(slug, (fused.get(slug) || 0) + 1 / (RRF_K + r + 1)));
-    const localRanked = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-
-    // ONE SHAPE for both paths, so everything below is blind to who did the matching. The server
-    // already returns the channel tag and the description, because it did the fusion that knows
-    // them; locally they are derived from the two channel sets.
-    const bySparse = new Set(sparseRanked.map(([s]) => s));
-    const byDense = new Set(denseRanked.map(([s]) => s));
-    const hits = systemEvent ? [] : serverRanked
-      // The body, and how much of it, travel with the hit. This rebuilt each one with a fixed
-      // shape, so a server that had just sent 1500 characters of the memory had them thrown away
-      // one line later and the injection still told the agent to go and fetch it.
-      ? serverRanked.filter((m) => m && m.slug).map((m) => ({
-        slug: m.slug, how: m.how || 'both', description: m.description || '',
-        body: m.body || '', chars: m.chars || 0, truncated: !!m.truncated,
-      }))
-      : localRanked.map(([slug]) => ({
-        slug,
-        how: bySparse.has(slug) && byDense.has(slug) ? 'both' : byDense.has(slug) ? 'meaning' : 'keyword',
-        description: (idx && idx.descriptions[slug]) || '',
-      }));
-    // RECALL PULSE LOG. Which memories this turn actually used, appended as one line.
-    //
-    // Nothing else in the system knows this. The brain server is deliberately dumb and never
-    // learns which memories matched (it returns a vector, not names), and the fusion happens
-    // here. So if anything is ever to SHOW the brain being used, the fact has to be written
-    // down at the only point that holds it, which is this one.
-    //
-    // Fails silent and is capped, like everything else in this hook: a recall must never be
-    // slowed or broken by bookkeeping about recall. Gitignored, local to each machine.
-    try {
-      const PULSE = join(BRAIN, '.recall-pulse.jsonl');
-      appendFileSync(PULSE, JSON.stringify({
-        at: Date.now(), host: hostname(), slugs: hits.map((h) => h.slug), how: hits.map((h) => h.how),
-      }) + '\n', 'utf8');
-      // Trim from the front once it grows, so an always-on machine cannot fill the disk with
-      // a log nobody reads twice. 400 turns is days of history and about 80 KB.
-      const lines = readFileSync(PULSE, 'utf8').split('\n').filter(Boolean);
-      if (lines.length > 400) writeFileSync(PULSE, lines.slice(-300).join('\n') + '\n', 'utf8');
-    } catch { /* bookkeeping only, never break a turn for it */ }
-    // And to the server, so the machine that draws the map sees every machine.
-    postPulse(hits, BRAIN);
-
-    // RESULTS ALERTS, from tools/analytics.mjs on its five minute timer.
-    //
-    // A scheduled task cannot push to a phone, and a session may not be open. The one channel
-    // that reaches the owner regardless is this injection, on the next prompt, on ANY machine. Only
-    // alerts first seen in the last six hours are shown, so a resolved or ageing condition does
-    // not nag every prompt for a day. The analyzer clears an alert when its condition clears.
-    try {
-      const al = JSON.parse(readFileSync(join(BRAIN, '.brain-alerts.json'), 'utf8')).alerts || {};
-      const cutoff = Date.now() - 6 * 3600 * 1000;
-      const live = Object.values(al).filter((a) => a && Date.parse(a.firstSeen) > cutoff);
-      if (live.length) {
-        // The owner, 2026-09-05: 'no need for the alert to reach me as long as we have the data, you
-        // can put limits to their number and you can keep an eye on them.' So this is for the
-        // AGENT, not for him: look, act if it is yours to act on, and only raise it with him when
-        // it changes what he would do. Capped so a bad hour cannot bloat every prompt.
-        const shown = live.slice(0, 3);
-        out.push('', 'BRAIN RESULTS, ' + live.length + ' condition(s) flagged by the analyzer. For YOU to keep an eye on: check, act if it is yours, and do NOT raise it with the owner unless it changes what he would do.');
-        for (const a of shown) out.push('  ' + a.text + '   (since ' + String(a.firstSeen).slice(11, 16) + ' UTC)');
-        if (live.length > shown.length) out.push('  and ' + (live.length - shown.length) + ' more in .brain-alerts.json');
-      }
-    } catch { /* no alerts file, nothing to say */ }
-
-    if (denseNote && !hits.length) out.push("", denseNote);
-    if (hits.length) {
-      // Full absolute paths, not a `memory/<slug>.md` template.
-      //
-      // Naming a file is not the same as making it easy to open. With a template the agent has
-      // to reconstruct the path before it can read anything, and the cheapest way to resolve
-      // that friction is to answer from the one-line description instead. That is precisely the
-      // failure this hook exists to prevent: a description says whether a file is worth opening,
-      // never what it says. A ready-to-paste path makes reading the lazy option.
-      const memPath = (slug) => join(BRAIN, 'memory', slug + '.md').replace(/\\/g, '/');
-      /* COMPACT BLOCK, 2026-09-25. The owner: recall must be cheap enough for a 20 dollar plan and slow
-         local models. Measured on 60 real test messages, the same recalled memories shown four ways, and
-         a model (Gemini 3.8 Flash, all items inline; Haiku gave the same order) choosing which to open:
-         full descriptions plus a path per line, 1,864 tokens, opened 30 of the 119 right memories (it
-         read the long descriptions as if they were the answer and opened 0.8 files); name plus the first
-         60 characters, 304 tokens, opened 89 of 119. So the short line is both six times cheaper and
-         better. The folder is given once; a memory already shown in this conversation (same
-         session_id) is listed by name only: a 25-turn real session went from 62,781 to about 13,600
-         recall tokens. */
-      const shownFile = payload && payload.session_id && /^[A-Za-z0-9_-]{6,80}$/.test(String(payload.session_id))
-        ? join(homedir(), '.claude', 'havok-recall-shown', String(payload.session_id) + '.json') : null;
-      let shown = [];
-      try { if (shownFile) shown = JSON.parse(readFileSync(shownFile, 'utf8')); } catch { /* first turn */ }
-      const shownSet = new Set(shown);
-      const cut = (s, n) => { const x = String(s || ''); return x.length <= n ? x : x.slice(0, n).replace(/\s+\S*$/, '') + '...'; };
-      out.push(
-        '',
-        `BRAIN RECALL: ${hits.length} memories (${holdsMemoriesLocally(BRAIN) ? 'files: ' + join(BRAIN, 'memory').split(String.fromCharCode(92)).join('/') + '/<name>.md' : 'on the brain server only; open one with node tools/brain-client.mjs read <slug>'}). `
-          + 'These lines only say which files are worth opening, never what they say: open the relevant ones before answering.',
-        ...(denseNote ? [denseNote] : []),
-      );
-      const again = hits.filter((h) => shownSet.has(h.slug) && existsSync(memPath(h.slug))).map((h) => h.slug);
-      try {
-        if (shownFile) {
-          mkdirSync(dirname(shownFile), { recursive: true });
-          writeFileSync(shownFile, JSON.stringify([...new Set([...shown, ...hits.map((h) => h.slug)])]));
+        const score = new Map();
+        for (const w of words) {
+            const slugs = idx ? idx.terms[w] : null;
+            if (!slugs)
+                continue;
+            const weight = 1 / slugs.length;
+            for (const s of slugs)
+                score.set(s, (score.get(s) || 0) + weight);
         }
-      } catch { /* remembering what was shown must never cost the turn its recall */ }
-      if (again.length) out.push('- shown earlier in this conversation, still relevant: ' + again.join(', '));
-      // Tag each hit with the channel that found it.
-      //
-      // a laptop client, 2026-08-22, during the first live test of remote embedding: "I see five
-      // matched memories per turn and no indication of which mode found them", so it could not
-      // tell a semantic hit from a keyword one and neither could anyone else. The information
-      // exists right up until fusion and was thrown away.
-      //
-      // Worth surfacing permanently, not just for the test. A hit marked "meaning" is one the
-      // keyword channel MISSED, which is the only direct evidence that the 434MB model earns its
-      // place. When that tag stops appearing, the dense channel has quietly stopped contributing.
-      // The tag is computed where the fusion happened, which is now either here or on the server.
-      for (const h of hits) {
-        if (again.includes(h.slug)) continue;
-        out.push(`- [${h.how}] ${h.slug}: ${cut(h.description, 60)}`);
-        // A path that does not resolve is WORSE than no path. The agent tries to open it, gets
-        // nothing, and the cheapest remaining move is to answer from the one-line description,
-        // which is the single failure this whole hook exists to prevent. the client company already has
-        // a stale memory/ and gets recalled slugs whose files are not on that disk. So when the
-        // local file is missing, name the command that fetches the body from the server.
-        const p = memPath(h.slug);
-        if (existsSync(p)) continue;
-        // No local copy. The body came down with the ranking, so it goes in here rather than being
-        // named and left behind a second call the agent may never make.
-        if (h.body) {
-          out.push('  ---');
-          for (const line of String(h.body).split('\n')) out.push('  ' + line);
-          out.push(h.truncated
-            ? '  --- [cut at ' + String(h.body).length + ' of ' + h.chars + ' characters. The rest: '
-              + 'node tools/brain-client.mjs read ' + h.slug + ']'
-            : '  ---');
-        } else {
-          out.push(`  node tools/brain-client.mjs read ${h.slug}   (no local copy, fetch it from the server)`);
+        const sparseRanked = [...score.entries()]
+            .filter(([, v]) => v >= Number(process.env.RECALL_MIN || 0.10))
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 20);
+        const RRF_K = 60;
+        const fused = new Map();
+        sparseRanked.forEach(([slug], r) => fused.set(slug, (fused.get(slug) || 0) + 1 / (RRF_K + r + 1)));
+        denseRanked.forEach(([slug], r) => fused.set(slug, (fused.get(slug) || 0) + 1 / (RRF_K + r + 1)));
+        const localRanked = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+        const bySparse = new Set(sparseRanked.map(([s]) => s));
+        const byDense = new Set(denseRanked.map(([s]) => s));
+        const hits = systemEvent ? [] : serverRanked
+            ? serverRanked.filter((m) => m && m.slug).map((m) => ({
+                slug: m.slug, how: m.how || 'both', description: m.description || '',
+                body: m.body || '', chars: m.chars || 0, truncated: !!m.truncated,
+            }))
+            : localRanked.map(([slug]) => ({
+                slug,
+                how: bySparse.has(slug) && byDense.has(slug) ? 'both' : byDense.has(slug) ? 'meaning' : 'keyword',
+                description: (idx && idx.descriptions[slug]) || '',
+            }));
+        try {
+            const PULSE = join(BRAIN, '.recall-pulse.jsonl');
+            appendFileSync(PULSE, JSON.stringify({
+                at: Date.now(), host: hostname(), slugs: hits.map((h) => h.slug), how: hits.map((h) => h.how),
+            }) + '\n', 'utf8');
+            const lines = readFileSync(PULSE, 'utf8').split('\n').filter(Boolean);
+            if (lines.length > 400)
+                writeFileSync(PULSE, lines.slice(-300).join('\n') + '\n', 'utf8');
         }
-      }
+        catch { }
+        postPulse(hits, BRAIN);
+        try {
+            const al = JSON.parse(readFileSync(join(BRAIN, '.brain-alerts.json'), 'utf8')).alerts || {};
+            const cutoff = Date.now() - 6 * 3600 * 1000;
+            const live = Object.values(al).filter((a) => a && Date.parse(a.firstSeen) > cutoff);
+            if (live.length) {
+                const shown = live.slice(0, 3);
+                out.push('', 'BRAIN RESULTS, ' + live.length + ' condition(s) flagged by the analyzer. For YOU to keep an eye on: check, act if it is yours, and do NOT raise it with the person unless it changes what he would do.');
+                for (const a of shown)
+                    out.push('  ' + a.text + '   (since ' + String(a.firstSeen).slice(11, 16) + ' UTC)');
+                if (live.length > shown.length)
+                    out.push('  and ' + (live.length - shown.length) + ' more in .brain-alerts.json');
+            }
+        }
+        catch { }
+        if (denseNote && !hits.length)
+            out.push("", denseNote);
+        if (hits.length) {
+            const memPath = (slug) => join(BRAIN, 'memory', slug + '.md').replace(/\\/g, '/');
+            const shownFile = payload && payload.session_id && /^[A-Za-z0-9_-]{6,80}$/.test(String(payload.session_id))
+                ? join(homedir(), '.claude', 'havok-recall-shown', String(payload.session_id) + '.json') : null;
+            let shown = [];
+            try {
+                if (shownFile)
+                    shown = JSON.parse(readFileSync(shownFile, 'utf8'));
+            }
+            catch { }
+            const shownSet = new Set(shown);
+            const cut = (s, n) => { const x = String(s || ''); return x.length <= n ? x : x.slice(0, n).replace(/\s+\S*$/, '') + '...'; };
+            out.push('', `BRAIN RECALL: ${hits.length} memories (${holdsMemoriesLocally(BRAIN) ? 'files: ' + join(BRAIN, 'memory').split(String.fromCharCode(92)).join('/') + '/<name>.md' : 'on the brain server only; open one with node tools/brain-client.mjs read <slug>'}). `
+                + 'These lines only say which files are worth opening, never what they say: open the relevant ones before answering.', ...(denseNote ? [denseNote] : []));
+            const again = hits.filter((h) => shownSet.has(h.slug) && existsSync(memPath(h.slug))).map((h) => h.slug);
+            try {
+                if (shownFile) {
+                    mkdirSync(dirname(shownFile), { recursive: true });
+                    writeFileSync(shownFile, JSON.stringify([...new Set([...shown, ...hits.map((h) => h.slug)])]));
+                }
+            }
+            catch { }
+            if (again.length)
+                out.push('- shown earlier in this conversation, still relevant: ' + again.join(', '));
+            for (const h of hits) {
+                if (again.includes(h.slug))
+                    continue;
+                out.push(`- [${h.how}] ${h.slug}: ${cut(h.description, 60)}`);
+                const p = memPath(h.slug);
+                if (existsSync(p))
+                    continue;
+                if (h.body) {
+                    out.push('  ---');
+                    for (const line of String(h.body).split('\n'))
+                        out.push('  ' + line);
+                    out.push(h.truncated
+                        ? '  --- [cut at ' + String(h.body).length + ' of ' + h.chars + ' characters. The rest: '
+                            + 'node tools/brain-client.mjs read ' + h.slug + ']'
+                        : '  ---');
+                }
+                else {
+                    out.push(`  node tools/brain-client.mjs read ${h.slug}   (no local copy, fetch it from the server)`);
+                }
+            }
+        }
     }
-  }
-
-  /* THE AGENT SEARCHES, NOT THE RAW MESSAGE (The owner, 2026-10-15: "the messages that I write are really bad, and the AI
-     will write really good messages. So I think we should activate it and run some tests on the costs with it
-     for like a week"). With hooks/agent-search.json on, the automatic list is replaced by one instruction: the
-     agent writes his message as needs and searches with them, and names anything learned or corrected so it gets
-     saved. hooks/recall-gate.mjs refuses other tools and the end of the turn until that search ran. */
-  try {
-    const as = JSON.parse(readFileSync(join(BRAIN, 'hooks', 'agent-search.json'), 'utf8'));
-    if (as.on && !systemEvent) {
-      const at = out.findIndex((l) => typeof l === 'string' && l.startsWith('BRAIN RECALL:'));
-      if (at >= 0) out.splice(at > 0 && out[at - 1] === '' ? at - 1 : at);
-      const cli = join(BRAIN, 'tools', 'brain-client.mjs').replace(/\\/g, '/');
-      out.push('', 'BRAIN RECALL BY SEARCH, YOUR FIRST STEP THIS TURN. Before any other tool and before answering, work out from this message and the conversation what knowledge you need, one need per separate piece of knowledge, including the standing rules or preferences that apply to the task, and run ONE command with one quoted question per need: as many as the message really has separate pieces (a short message often 2 to 4; a long message, a pasted text or a file with many instructions, one per topic, up to 20), each written as the direct question you need the brain to answer, as long as it needs to be precise (usually 10 to 30 words), plain English, names of people, companies, systems and topics spelled out, typing mistakes corrected, "it" and "that" resolved. Add --learned "<one sentence>" for each thing learned or corrected since the last message (a decision, a fact that turned out different, a correction the user gave you); none if nothing was learned:',
-        'node "' + cli + '" search "<question 1>" "<question 2>" ... --learned "<what was learned>"',
-        'Every other tool and the end of the turn are refused until it has run, and while a learned item is not settled: save it, replace the memory it contradicts, or confirm it is already saved.');
+    try {
+        const as = JSON.parse(readFileSync(join(BRAIN, 'hooks', 'agent-search.json'), 'utf8'));
+        if (as.on && !systemEvent) {
+            const at = out.findIndex((l) => typeof l === 'string' && l.startsWith('BRAIN RECALL:'));
+            if (at >= 0)
+                out.splice(at > 0 && out[at - 1] === '' ? at - 1 : at);
+            const cli = join(BRAIN, 'tools', 'brain-client.mjs').replace(/\\/g, '/');
+            out.push('', 'BRAIN RECALL BY SEARCH, YOUR FIRST STEP THIS TURN. Before any other tool and before answering, work out from this message and the conversation what knowledge you need, one need per separate piece of knowledge, including the standing rules or preferences that apply to the task, and run ONE command with one quoted question per need: as many as the message really has separate pieces (a short message often 2 to 4; a long message, a pasted text or a file with many instructions, one per topic, up to 20), each written as the direct question you need the brain to answer, as long as it needs to be precise (usually 10 to 30 words), plain English, names of people, companies, systems and topics spelled out, typing mistakes corrected, "it" and "that" resolved. Add --learned "<one sentence>" for each thing learned or corrected since the last message (a decision, a fact that turned out different, a correction the user gave you); none if nothing was learned:', 'node "' + cli + '" search "<question 1>" "<question 2>" ... --learned "<what was learned>"', 'Every other tool and the end of the turn are refused until it has run, and while a learned item is not settled: save it, replace the memory it contradicts, or confirm it is already saved.');
+        }
     }
-  } catch { /* no flag file: the automatic list stays */ }
-
-  /* SMART COMPACTION, THE AGENT'S CUE (The owner, 2026-10-16). From 300,000 tokens the agent judges whether to compact
-     and, at a natural break, asks him; it never compacts without his yes. Context size is read from the last
-     model reply's usage in the transcript, so no machine needs a status line change. The lock is
-     hooks/compact-lock.mjs, the approval tools/compact-approve.mjs, the content the agent's own brief. */
-  try {
-    let ctxTokens = 0;
-    const tp = payload && payload.transcript_path;
-    if (tp && existsSync(tp) && !systemEvent) {
-      for (const l of tailLines(tp, (ls) => ls.some((x) => x.includes('"type":"assistant"') && x.includes('"usage"'))).reverse()) {
-        let o; try { o = JSON.parse(l); } catch { continue; }
-        const u = o && o.type === 'assistant' && o.message && o.message.usage;
-        if (u) { ctxTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0); break; }
-      }
+    catch { }
+    try {
+        let ctxTokens = 0;
+        const tp = payload && payload.transcript_path;
+        if (tp && existsSync(tp) && !systemEvent) {
+            for (const l of tailLines(tp, (ls) => ls.some((x) => x.includes('"type":"assistant"') && x.includes('"usage"'))).reverse()) {
+                let o;
+                try {
+                    o = JSON.parse(l);
+                }
+                catch {
+                    continue;
+                }
+                const u = o && o.type === 'assistant' && o.message && o.message.usage;
+                if (u) {
+                    ctxTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+                    break;
+                }
+            }
+        }
+        if (SMART_COMPACTION && ctxTokens >= COMPACT_FROM) {
+            const cli = join(BRAIN, 'tools', 'compact-approve.mjs').replace(/\\/g, '/');
+            out.push('', 'CONTEXT IS AT ' + Math.round(ctxTokens / 1000) + ',000 TOKENS (compaction is considered from ' + COMPACT_FROM / 1000 + ',000). You judge whether this conversation should be compacted: not while a long piece of work is under way, yes at a natural break. If you think it should, ask the person in one line, in the word "compacting", and wait; never compact without his yes, and no reply means he is away. On his yes: settle anything learned into the brain, run node "' + cli + '", then write your compaction brief with the Write tool to ~/.claude/havok-compact-brief/<session id>.md, never as a chat message (the person: keep it out of the chat to save tokens) (what you are working on and its exact state; what you still need exactly: his instructions and decisions in his words with their dates and what each answered, numbers with what they measured, paths, ids, amounts, open questions, ways of working he set; what can go: finished work already saved and where, old tool output, dead ends), then end with a two-line reply; the compaction starts on the next request.');
+        }
     }
-    if (SMART_COMPACTION && ctxTokens >= COMPACT_FROM) {
-      const cli = join(BRAIN, 'tools', 'compact-approve.mjs').replace(/\\/g, '/');
-      out.push('', 'CONTEXT IS AT ' + Math.round(ctxTokens / 1000) + ',000 TOKENS (compaction is considered from ' + COMPACT_FROM / 1000 + ',000). You judge whether this conversation should be compacted: not while a long piece of work is under way, yes at a natural break. If you think it should, ask the owner in one line, in the word "compacting", and wait; never compact without his yes, and no reply means he is away. On his yes: settle anything learned into the brain, run node "' + cli + '", then write your compaction brief with the Write tool to ~/.claude/havok-compact-brief/<session id>.md, never as a chat message (the owner: keep it out of the chat to save tokens) (what you are working on and its exact state; what you still need exactly: his instructions and decisions in his words with their dates and what each answered, numbers with what they measured, paths, ids, amounts, open questions, ways of working he set; what can go: finished work already saved and where, old tool output, dead ends), then end with a two-line reply; the compaction starts on the next request.');
+    catch { }
+    try {
+        if (!systemEvent && PUBLIC_NAME.test(JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name)) {
+            const { updateNotice } = await import('../tools/update.mjs');
+            const note = updateNotice(BRAIN);
+            if (note)
+                out.push('', note);
+        }
     }
-  } catch { /* the cue is a help, never a reason to lose the turn */ }
-  /* INFINITE CONTEXT UPDATES (the owner, 2026-11-02: "for the people that use our repo, they receive updates
-     automatically"). Only in an install of the public repository (its package.json names infinite-context), so the
-     owner's own brain never runs it. tools/update.mjs returns the last result worth telling, once, and starts a check
-     in the background when the last one is a day old; this turn never waits for it. */
-  try {
-    if (!systemEvent && PUBLIC_NAME.test(JSON.parse(readFileSync(join(BRAIN, 'package.json'), 'utf8')).name)) {
-      const { updateNotice } = await import('../tools/update.mjs');
-      const note = updateNotice(BRAIN);
-      if (note) out.push('', note);
+    catch { }
+    if (DEADLINE_HIT)
+        out.push('', 'brain unreachable, recall skipped (no answer within ' + Math.round(HOOK_LIMIT_MS / 1000) + ' s)');
+    ok(out.join('\n'));
+}
+catch (e) {
+    try {
+        process.stdout.write(JSON.stringify({
+            hookSpecificOutput: {
+                hookEventName: 'UserPromptSubmit',
+                additionalContext: 'BRAIN RULES FAILED TO LOAD (' + String(e && e.message).slice(0, 120) + '). You are '
+                    + 'running with NO behaviour rules and no recall this turn. Tell the person before answering, '
+                    + 'and keep replies short and honest from memory. Fix: node tools/build-index.mjs in '
+                    + 'the brain, then check hooks/pre-turn.mjs.',
+            },
+        }));
     }
-  } catch { /* an update notice is never a reason to lose the turn */ }
-  if (DEADLINE_HIT) out.push('', 'brain unreachable, recall skipped (no answer within ' + Math.round(HOOK_LIMIT_MS / 1000) + ' s)');
-  ok(out.join('\n'));
-} catch (e) {
-  // Failing silent here was wrong, and it is the worst failure this file can have.
-  //
-  // Everywhere else in the watcher, silence is the safe default. Not here. If this throws, the
-  // agent loses EVERY behaviour rule for that turn and nothing anywhere says so: it just starts
-  // writing long, claiming things are done, and telling the owner the problem is his end, exactly the
-  // behaviours these rules exist to stop. Indistinguishable from the rules being wrong.
-  //
-  // So say so, in the injection itself, where the agent will read it. One line, still cannot
-  // block the turn.
-  try {
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'UserPromptSubmit',
-        additionalContext:
-          'BRAIN RULES FAILED TO LOAD (' + String(e && e.message).slice(0, 120) + '). You are '
-          + 'running with NO behaviour rules and no recall this turn. Tell the owner before answering, '
-          + 'and keep replies short and honest from memory. Fix: node tools/build-index.mjs in '
-          + 'the brain, then check hooks/pre-turn.mjs.',
-      },
-    }));
-  } catch { /* stdout itself is gone, nothing left to do */ }
-  process.exit(0);
+    catch { }
+    process.exit(0);
 }

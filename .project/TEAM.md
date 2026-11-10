@@ -21,7 +21,7 @@ Owner (repository owner)
         |     Routine edits, test writing, boilerplate, refactors
         |
         +-- Outside contributors
-              Pull requests under the CLA, reviewed by the owner
+              Pull requests under the CLA, reviewed by the maintainer
 ```
 
 ## Model Selection

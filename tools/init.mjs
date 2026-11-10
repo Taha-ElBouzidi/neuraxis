@@ -1,291 +1,246 @@
 #!/usr/bin/env node
-// Set up a brand new, empty brain on this machine. One command, no server, no network.
-//
-// The owner, 2026-09-05: "we need it to be easy for people to use and for AI to install it on its own."
-//
-// The second half is the harder and more interesting one, so this tool is written to be run by an
-// agent reading AGENTS.md as much as by a person: it is idempotent, it refuses rather than
-// overwrites, it prints what it did, and it verifies itself at the end instead of assuming.
-//
-// WHY SEED RULES EXIST. A fresh install has `index/rules.json` = `{"rules": []}`, because the
-// always-on behaviour rules are GENERATED from memory frontmatter, from any memory carrying a
-// `rule:` line. So the rules are content, not engine, and an empty brain produces an agent with no
-// operating rules at all. That was found by actually installing a clean export on 2026-09-05, not
-// by reading the code. The eight below are the universal ones, with nothing personal in them.
-//
-//   node tools/init.mjs                         set up an empty brain here
-//   node tools/init.mjs --plan small            the same, and say how much the assistant may spend:
-//                                               small (the default), standard or large (tools/plan.mjs)
-//   node tools/init.mjs --force                 re-seed even if memories already exist
-//
-// It does NOT touch git, does NOT reach the network, and does NOT install the Claude Code hook.
-// That last one is a separate, reversible step: node tools/install-hook.mjs
-
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import { SUB_AGENT_RULE, SUB_AGENT_SHORT } from '../hooks/plan-rules.mjs';
 import { setPlan, PLANS, DEFAULT_PLAN } from './plan.mjs';
-
 const BRAIN = process.env.HAVOK_BRAIN || resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FORCE = process.argv.includes('--force');
 const NO_SEMANTIC = process.argv.includes('--no-semantic');
 const planAt = process.argv.indexOf('--plan');
 const PLAN = planAt > -1 ? String(process.argv[planAt + 1] || '').toLowerCase() : DEFAULT_PLAN;
 if (!PLANS.includes(PLAN)) {
-  process.stdout.write('--plan takes one of: ' + PLANS.join(', ') + String.fromCharCode(10));
-  process.exit(2);
+    process.stdout.write('--plan takes one of: ' + PLANS.join(', ') + String.fromCharCode(10));
+    process.exit(2);
 }
 const NL = String.fromCharCode(10);
 const say = (s) => process.stdout.write(s + NL);
-
-// ---- the seed rules ---------------------------------------------------------------------------
-// Deliberately generic. Nothing here is about one person, one company or one machine. They are the
-// rules that stop an agent doing the specific damage a memory system makes possible: sounding
-// certain about a stale fact, claiming something works without running it, and losing what it
-// learned the moment the session ends.
 const SEEDS = [
-  {
-    slug: 'feedback_verify_before_claiming',
-    name: 'Never say it works until you have run it and read the output',
-    order: 10,
-    short: "VERIFY BEFORE YOU CLAIM. Never say done, fixed or working until you have run it and read the output; say what you ran and what it returned.",
-    rule: 'VERIFY BEFORE YOU CLAIM. Never say done, fixed, working or passing until you have run it and read the output. Say what you ran and what it returned. A file written is not a test passed, a test passed is not a thing deployed, and a thing deployed is not a thing the user can see. If you could not verify, say exactly that instead of implying success.',
-    desc: 'Do not tell me something is done, fixed or working until you have actually run it and read what it printed. Say what you ran and what came back.',
-    body: [
-      'The single most expensive failure an agent has, because it is invisible: the work looks',
-      'finished, and nobody finds out otherwise until it matters.',
-      '',
-      'A file written is not a test passed. A test passed is not a thing deployed. A thing deployed is',
-      'not a thing the user can see. Each of those gaps has to be crossed on purpose.',
-      '',
-      'When you genuinely cannot verify something, say so in the same sentence as the claim, never in',
-      'a caveat further down where it reads as optional.',
-    ],
-    links: ['feedback_say_when_the_brain_is_down', 'feedback_write_it_the_moment_you_learn_it'],
-  },
-  {
-    slug: 'feedback_say_when_the_brain_is_down',
-    name: 'If the brain is unreachable, say so before answering, never work blind',
-    order: 20,
-    short: "IF THE MEMORY IS UNREACHABLE, SAY SO IN YOUR FIRST SENTENCE. Never answer blind while sounding sure.",
-    rule: 'IF THE BRAIN IS UNREACHABLE, SAY SO IN YOUR FIRST SENTENCE. Degraded recall that announces itself is recoverable. Silent degradation means answering from nothing while sounding exactly as confident as usual, which is worse than having no memory at all.',
-    desc: 'Tell me straight away when you cannot reach the memory, instead of answering anyway and sounding just as sure as normal.',
-    body: [
-      'A memory system fails quietly. Recall returns nothing, the agent carries on, and the answer',
-      'sounds identical to a well-informed one. Nothing on screen says otherwise.',
-      '',
-      'So the degradation must be announced, not detected. First sentence, before the answer.',
-      '',
-      'The same applies to partial degradation: keyword-only recall, a stale index, a memory file that',
-      'could not be opened. Name it.',
-    ],
-    links: ['feedback_verify_before_claiming', 'feedback_open_the_memory_not_the_description'],
-  },
-  {
-    slug: 'feedback_open_the_memory_not_the_description',
-    name: 'The one-line description says whether to open a memory, never what it says',
-    order: 30,
-    short: "OPEN THE MEMORIES RECALL NAMES. Never answer from their one-line description.",
-    rule: 'OPEN THE MEMORIES RECALL NAMES. The one-line description exists to tell you whether a file is worth opening, never what is in it. Answering from a description is how a half-remembered fact gets stated as current. Read the file before you rely on it.',
-    desc: 'Actually open the memory files instead of answering from the one-line summary you were shown.',
-    body: [
-      'Recall returns pointers, not content: a slug, a one-line description, and where to find it.',
-      'That is deliberate, because injecting every candidate memory into every prompt costs far more',
-      'than reading the one or two that matter.',
-      '',
-      'The failure it creates is answering from the description, which is a summary written at some',
-      'point in the past for a different purpose. It is enough to decide relevance and never enough to',
-      'decide truth.',
-    ],
-    links: ['feedback_say_when_the_brain_is_down', 'feedback_write_it_the_moment_you_learn_it'],
-  },
-  {
-    slug: 'feedback_write_it_the_moment_you_learn_it',
-    name: 'Write the memory the moment something becomes true, never later',
-    order: 40,
-    short: "SAVE IT THE MOMENT YOU LEARN IT. Anything true and lasting becomes a memory in the same turn, then index it.",
-    rule: 'WRITE IT THE MOMENT YOU LEARN IT. When something becomes durably true, a decision and its reason, a fact about a system, a correction you were given, a thing that broke and why, write the memory NOW. Never say you will do it later. The session ends and it is gone.',
-    desc: 'Save what you learn as you learn it. Do not wait until the end of the session, because by then it is lost.',
-    body: [
-      'Knowledge flows one way: into the memory, then back out to every future session. Anything that',
-      'does not get written did not happen, as far as tomorrow is concerned.',
-      '',
-      'The description is the retrieval surface, and on most setups it is the ONLY thing indexed.',
-      'Write it in the words the user would actually type when looking for it, not in the technical',
-      'vocabulary of the thing being described. A memory with a vague description exists and can never',
-      'be found, which is worse than not writing it.',
-    ],
-    links: ['feedback_open_the_memory_not_the_description', 'feedback_reversible_act_irreversible_ask'],
-  },
-  {
-    slug: 'feedback_reversible_act_irreversible_ask',
-    name: 'Judge an action by whether it can be undone, not by how big it feels',
-    order: 50,
-    short: "ACT ON WHAT CAN BE UNDONE, ASK ABOUT WHAT CANNOT: sending, deleting, publishing, spending, installing.",
-    rule: 'ACT ON WHAT IS REVERSIBLE, ASK ABOUT WHAT IS NOT. If it is cheap to undo and stays on this machine, do it and report what changed. If it leaves the machine or cannot be taken back, sending, publishing, spending, deleting, installing something permanent, do the reversible part and then ask.',
-    desc: 'Just do the things that can be undone. Ask me first only when it cannot be taken back, like sending, deleting, publishing or spending.',
-    body: [
-      'The useful axis is reversibility, not how important the task sounds. Renaming a variable and',
-      'sending an email to a client are not the same kind of act, and neither is "big".',
-      '',
-      'Not knowing how is not a reason to ask. Go and find out: read the code, test it on a copy, then',
-      'act. Guessing and handing the question back are both failures.',
-    ],
-    links: ['feedback_verify_before_claiming', 'feedback_write_it_the_moment_you_learn_it'],
-  },
-  {
-    slug: 'feedback_best_model_for_each_task',
-    name: 'Pick the right model for each task and say which',
-    order: 60,
-    short: 'PICK THE MODEL FOR THE TASK AND SAY WHICH: small for search and lookups, balanced for writing and routine code, strongest for planning, hard bugs and decisions.',
-    rule: 'PICK THE RIGHT MODEL FOR EACH TASK AND SAY WHICH. Before any non-trivial task, state in one line which model fits it and why: the small fast model for searching, finding things and simple lookups; the balanced model for summarising, writing, routine code, tests and refactors; the strongest model for planning, architecture, hard debugging, security and decisions with real consequences. If the model running now is weaker than the task needs, say so before starting. When you start a sub-agent, set its model by the same rule.',
-    desc: 'Which AI model should I use for this, best model for each task, small or balanced or strongest, when to switch model, which model for a sub agent.',
-    body: [
-      'Examples by tier: small and fast, Claude Haiku, Gemini Flash, GPT mini; balanced, Claude Sonnet,',
-      'Gemini Pro, GPT standard; strongest, Claude Opus or the top reasoning model available.',
-      'The plan the user pays for decides which exist. On a plan with tight limits, keep the strongest',
-      'model for the jobs that need it. Never send judgment to the small tier.',
-      'The full method is the delegate-to-sub-agents skill.',
-    ],
-    links: ['feedback_sub_agents_get_a_ready_brief', 'feedback_verify_before_claiming'],
-  },
-  {
-    slug: 'feedback_sub_agents_get_a_ready_brief',
-    name: 'Sub-agents only as the plan allows, each with a complete brief',
-    order: 70,
-    // Worded so the plan setting decides (hooks/plan-rules.mjs). Until 0.4.89 this rule told every install to run
-    // sub-agents in the background and in parallel whenever a task split into parts, which spends a small plan fast.
-    short: SUB_AGENT_SHORT,
-    rule: SUB_AGENT_RULE,
-    desc: 'Sub agents, helpers, run agents in parallel, background agents, delegate work, how many helpers my plan allows, how to brief a sub agent.',
-    body: [
-      'How many helpers may start, and when, depends on the plan set at install (small, standard or large,',
-      'node tools/plan.mjs). On a small plan none start unless the person asks.',
-      'The brief: goal and what done looks like; the facts, with memories copied in; exact file paths or',
-      'URLs; limits (no edits, no sending, a size or time limit); the output format; a self-check.',
-      'The main assistant recalls; sub-agents only receive what the brief gives them.',
-      'The full method is the delegate-to-sub-agents skill.',
-    ],
-    links: ['feedback_best_model_for_each_task', 'feedback_verify_before_claiming'],
-  },
-  {
-    slug: 'feedback_one_fact_one_memory',
-    name: 'One memory holds one fact, and is kept current',
-    order: 80,
-    short: 'ONE MEMORY, ONE FACT, KEPT CURRENT. Check for an existing memory first; update or replace it instead of adding a second; link it.',
-    rule: 'ONE MEMORY, ONE FACT, KEPT CURRENT. Each memory holds one thing: a fact, a rule, a decision, a person or an event. Its body says the fact, where it came from (the user\'s words with a date, or the file or test that proved it), where it applies, and why. Before writing, run tools/neuron-check.mjs; if the memory already exists, update it instead of writing a second. When a fact changes, replace the memory so two never disagree. Link each memory to the ones it depends on (the other memory file name in double square brackets).',
-    desc: 'How to save a memory, update a memory, duplicate memories, a fact changed, keep the memory clean.',
-    body: [
-      'A memory system rots through two copies that disagree, not through missing facts. The one that',
-      'is wrong keeps coming back in recall, sounding as current as the one that is right.',
-      'The full method, with the file format and the commands, is the save-a-memory skill.',
-    ],
-    links: ['feedback_write_it_the_moment_you_learn_it', 'feedback_open_the_memory_not_the_description'],
-  },
+    {
+        slug: 'feedback_verify_before_claiming',
+        name: 'Never say it works until you have run it and read the output',
+        order: 10,
+        short: "VERIFY BEFORE YOU CLAIM. Never say done, fixed or working until you have run it and read the output; say what you ran and what it returned.",
+        rule: 'VERIFY BEFORE YOU CLAIM. Never say done, fixed, working or passing until you have run it and read the output. Say what you ran and what it returned. A file written is not a test passed, a test passed is not a thing deployed, and a thing deployed is not a thing the user can see. If you could not verify, say exactly that instead of implying success.',
+        desc: 'Do not tell me something is done, fixed or working until you have actually run it and read what it printed. Say what you ran and what came back.',
+        body: [
+            'The single most expensive failure an agent has, because it is invisible: the work looks',
+            'finished, and nobody finds out otherwise until it matters.',
+            '',
+            'A file written is not a test passed. A test passed is not a thing deployed. A thing deployed is',
+            'not a thing the user can see. Each of those gaps has to be crossed on purpose.',
+            '',
+            'When you genuinely cannot verify something, say so in the same sentence as the claim, never in',
+            'a caveat further down where it reads as optional.',
+        ],
+        links: ['feedback_say_when_the_brain_is_down', 'feedback_write_it_the_moment_you_learn_it'],
+    },
+    {
+        slug: 'feedback_say_when_the_brain_is_down',
+        name: 'If the brain is unreachable, say so before answering, never work blind',
+        order: 20,
+        short: "IF THE MEMORY IS UNREACHABLE, SAY SO IN YOUR FIRST SENTENCE. Never answer blind while sounding sure.",
+        rule: 'IF THE BRAIN IS UNREACHABLE, SAY SO IN YOUR FIRST SENTENCE. Degraded recall that announces itself is recoverable. Silent degradation means answering from nothing while sounding exactly as confident as usual, which is worse than having no memory at all.',
+        desc: 'Tell me straight away when you cannot reach the memory, instead of answering anyway and sounding just as sure as normal.',
+        body: [
+            'A memory system fails quietly. Recall returns nothing, the agent carries on, and the answer',
+            'sounds identical to a well-informed one. Nothing on screen says otherwise.',
+            '',
+            'So the degradation must be announced, not detected. First sentence, before the answer.',
+            '',
+            'The same applies to partial degradation: keyword-only recall, a stale index, a memory file that',
+            'could not be opened. Name it.',
+        ],
+        links: ['feedback_verify_before_claiming', 'feedback_open_the_memory_not_the_description'],
+    },
+    {
+        slug: 'feedback_open_the_memory_not_the_description',
+        name: 'The one-line description says whether to open a memory, never what it says',
+        order: 30,
+        short: "OPEN THE MEMORIES RECALL NAMES. Never answer from their one-line description.",
+        rule: 'OPEN THE MEMORIES RECALL NAMES. The one-line description exists to tell you whether a file is worth opening, never what is in it. Answering from a description is how a half-remembered fact gets stated as current. Read the file before you rely on it.',
+        desc: 'Actually open the memory files instead of answering from the one-line summary you were shown.',
+        body: [
+            'Recall returns pointers, not content: a slug, a one-line description, and where to find it.',
+            'That is deliberate, because injecting every candidate memory into every prompt costs far more',
+            'than reading the one or two that matter.',
+            '',
+            'The failure it creates is answering from the description, which is a summary written at some',
+            'point in the past for a different purpose. It is enough to decide relevance and never enough to',
+            'decide truth.',
+        ],
+        links: ['feedback_say_when_the_brain_is_down', 'feedback_write_it_the_moment_you_learn_it'],
+    },
+    {
+        slug: 'feedback_write_it_the_moment_you_learn_it',
+        name: 'Write the memory the moment something becomes true, never later',
+        order: 40,
+        short: "SAVE IT THE MOMENT YOU LEARN IT. Anything true and lasting becomes a memory in the same turn, then index it.",
+        rule: 'WRITE IT THE MOMENT YOU LEARN IT. When something becomes durably true, a decision and its reason, a fact about a system, a correction you were given, a thing that broke and why, write the memory NOW. Never say you will do it later. The session ends and it is gone.',
+        desc: 'Save what you learn as you learn it. Do not wait until the end of the session, because by then it is lost.',
+        body: [
+            'Knowledge flows one way: into the memory, then back out to every future session. Anything that',
+            'does not get written did not happen, as far as tomorrow is concerned.',
+            '',
+            'The description is the retrieval surface, and on most setups it is the ONLY thing indexed.',
+            'Write it in the words the user would actually type when looking for it, not in the technical',
+            'vocabulary of the thing being described. A memory with a vague description exists and can never',
+            'be found, which is worse than not writing it.',
+        ],
+        links: ['feedback_open_the_memory_not_the_description', 'feedback_reversible_act_irreversible_ask'],
+    },
+    {
+        slug: 'feedback_reversible_act_irreversible_ask',
+        name: 'Judge an action by whether it can be undone, not by how big it feels',
+        order: 50,
+        short: "ACT ON WHAT CAN BE UNDONE, ASK ABOUT WHAT CANNOT: sending, deleting, publishing, spending, installing.",
+        rule: 'ACT ON WHAT IS REVERSIBLE, ASK ABOUT WHAT IS NOT. If it is cheap to undo and stays on this machine, do it and report what changed. If it leaves the machine or cannot be taken back, sending, publishing, spending, deleting, installing something permanent, do the reversible part and then ask.',
+        desc: 'Just do the things that can be undone. Ask me first only when it cannot be taken back, like sending, deleting, publishing or spending.',
+        body: [
+            'The useful axis is reversibility, not how important the task sounds. Renaming a variable and',
+            'sending an email to a client are not the same kind of act, and neither is "big".',
+            '',
+            'Not knowing how is not a reason to ask. Go and find out: read the code, test it on a copy, then',
+            'act. Guessing and handing the question back are both failures.',
+        ],
+        links: ['feedback_verify_before_claiming', 'feedback_write_it_the_moment_you_learn_it'],
+    },
+    {
+        slug: 'feedback_best_model_for_each_task',
+        name: 'Pick the right model for each task and say which',
+        order: 60,
+        short: 'PICK THE MODEL FOR THE TASK AND SAY WHICH: small for search and lookups, balanced for writing and routine code, strongest for planning, hard bugs and decisions.',
+        rule: 'PICK THE RIGHT MODEL FOR EACH TASK AND SAY WHICH. Before any non-trivial task, state in one line which model fits it and why: the small fast model for searching, finding things and simple lookups; the balanced model for summarising, writing, routine code, tests and refactors; the strongest model for planning, architecture, hard debugging, security and decisions with real consequences. If the model running now is weaker than the task needs, say so before starting. When you start a sub-agent, set its model by the same rule.',
+        desc: 'Which AI model should I use for this, best model for each task, small or balanced or strongest, when to switch model, which model for a sub agent.',
+        body: [
+            'Examples by tier: small and fast, Claude Haiku, Gemini Flash, GPT mini; balanced, Claude Sonnet,',
+            'Gemini Pro, GPT standard; strongest, Claude Opus or the top reasoning model available.',
+            'The plan the user pays for decides which exist. On a plan with tight limits, keep the strongest',
+            'model for the jobs that need it. Never send judgment to the small tier.',
+            'The full method is the delegate-to-sub-agents skill.',
+        ],
+        links: ['feedback_sub_agents_get_a_ready_brief', 'feedback_verify_before_claiming'],
+    },
+    {
+        slug: 'feedback_sub_agents_get_a_ready_brief',
+        name: 'Sub-agents only as the plan allows, each with a complete brief',
+        order: 70,
+        short: SUB_AGENT_SHORT,
+        rule: SUB_AGENT_RULE,
+        desc: 'Sub agents, helpers, run agents in parallel, background agents, delegate work, how many helpers my plan allows, how to brief a sub agent.',
+        body: [
+            'How many helpers may start, and when, depends on the plan set at install (small, standard or large,',
+            'node tools/plan.mjs). On a small plan none start unless the person asks.',
+            'The brief: goal and what done looks like; the facts, with memories copied in; exact file paths or',
+            'URLs; limits (no edits, no sending, a size or time limit); the output format; a self-check.',
+            'The main assistant recalls; sub-agents only receive what the brief gives them.',
+            'The full method is the delegate-to-sub-agents skill.',
+        ],
+        links: ['feedback_best_model_for_each_task', 'feedback_verify_before_claiming'],
+    },
+    {
+        slug: 'feedback_one_fact_one_memory',
+        name: 'One memory holds one fact, and is kept current',
+        order: 80,
+        short: 'ONE MEMORY, ONE FACT, KEPT CURRENT. Check for an existing memory first; update or replace it instead of adding a second; link it.',
+        rule: 'ONE MEMORY, ONE FACT, KEPT CURRENT. Each memory holds one thing: a fact, a rule, a decision, a person or an event. Its body says the fact, where it came from (the user\'s words with a date, or the file or test that proved it), where it applies, and why. Before writing, run tools/neuron-check.mjs; if the memory already exists, update it instead of writing a second. When a fact changes, replace the memory so two never disagree. Link each memory to the ones it depends on (the other memory file name in double square brackets).',
+        desc: 'How to save a memory, update a memory, duplicate memories, a fact changed, keep the memory clean.',
+        body: [
+            'A memory system rots through two copies that disagree, not through missing facts. The one that',
+            'is wrong keeps coming back in recall, sounding as current as the one that is right.',
+            'The full method, with the file format and the commands, is the save-a-memory skill.',
+        ],
+        links: ['feedback_write_it_the_moment_you_learn_it', 'feedback_open_the_memory_not_the_description'],
+    },
 ];
-
-// ---- go ----------------------------------------------------------------------------------------
 const memDir = join(BRAIN, 'memory');
 mkdirSync(memDir, { recursive: true });
 mkdirSync(join(BRAIN, 'index'), { recursive: true });
-
 const existing = readdirSync(memDir).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md');
 if (existing.length && !FORCE) {
-  say('This brain already holds ' + existing.length + ' memories, so it is not new.');
-  say('init is for an EMPTY brain and will not overwrite anything. Use --force to seed anyway.');
-  process.exit(1);
+    say('This brain already holds ' + existing.length + ' memories, so it is not new.');
+    say('init is for an EMPTY brain and will not overwrite anything. Use --force to seed anyway.');
+    process.exit(1);
 }
-
 const today = new Date().toISOString().slice(0, 10);
 let written = 0;
 for (const s of SEEDS) {
-  const file = join(memDir, s.slug + '.md');
-  if (existsSync(file) && !FORCE) { say('  kept (already there): ' + s.slug); continue; }
-  const doc = [
-    '---',
-    'name: ' + s.name,
-    'description: ' + s.desc,
-    'rule: "' + s.rule.split('"').join('\\"') + '"',
-    ...(s.short ? ['rule_short: "' + s.short.split('"').join('\\"') + '"'] : []),
-    'rule_order: ' + s.order,
-    'type: feedback',
-    'metadata:',
-    '  type: feedback',
-    '  asserted: ' + today,
-    '  updated: ' + today,
-    '---',
-    '',
-    ...s.body,
-    '',
-    '## Related',
-    s.links.map((l) => '[[' + l + ']]').join(' '),
-    '',
-  ].join(NL);
-  writeFileSync(file, doc, 'utf8');
-  written += 1;
+    const file = join(memDir, s.slug + '.md');
+    if (existsSync(file) && !FORCE) {
+        say('  kept (already there): ' + s.slug);
+        continue;
+    }
+    const doc = [
+        '---',
+        'name: ' + s.name,
+        'description: ' + s.desc,
+        'rule: "' + s.rule.split('"').join('\\"') + '"',
+        ...(s.short ? ['rule_short: "' + s.short.split('"').join('\\"') + '"'] : []),
+        'rule_order: ' + s.order,
+        'type: feedback',
+        'metadata:',
+        '  type: feedback',
+        '  asserted: ' + today,
+        '  updated: ' + today,
+        '---',
+        '',
+        ...s.body,
+        '',
+        '## Related',
+        s.links.map((l) => '[[' + l + ']]').join(' '),
+        '',
+    ].join(NL);
+    writeFileSync(file, doc, 'utf8');
+    written += 1;
 }
 say('seeded ' + written + ' behaviour rule(s) as memories');
-
-// The how-to memories (kit/memory): how to make a deck, research with sources, brief a sub-agent, and
-// so on. Memories, not skills, so recall brings them back when the conversation needs them and the
-// assistant applies them with judgment. The owner, 2026-09-26: "skills shouldn't be triggered like a
-// skill that you follow point for point, they should be memory on how to do stuff, indirectly."
-// Templates and long reference files stay in kit/files, where these memories point.
-// Since 2026-11-02 the copy is done by tools/kit.mjs, the same code an update uses: it records what it installed, so a
-// later update can tell a method the user changed from one never touched, and even with --force it never overwrites
-// a method the user changed (the kit version waits in kit-updates/ instead).
 const kitMem = join(BRAIN, 'kit', 'memory');
 if (existsSync(kitMem)) {
-  const { refreshKit } = await import('./kit.mjs');
-  const r = refreshKit({ brain: BRAIN, today, init: true, force: FORCE });
-  say('seeded ' + r.added.length + ' how-to memories (kit/memory)'
-    + (r.waiting.length ? '; ' + r.waiting.length + ' you changed were kept, their new versions wait in kit-updates/' : ''));
+    const { refreshKit } = await import('./kit.mjs');
+    const r = refreshKit({ brain: BRAIN, today, init: true, force: FORCE });
+    say('seeded ' + r.added.length + ' how-to memories (kit/memory)'
+        + (r.waiting.length ? '; ' + r.waiting.length + ' you changed were kept, their new versions wait in kit-updates/' : ''));
 }
-
-// ---- the plan: how much the assistant may spend ------------------------------------------------
-// Small unless --plan says otherwise, and a plan set earlier is kept when --plan is not given (a re-seed with --force
-// must not quietly lower a large plan). hooks/plan-rules.mjs has what each plan allows.
 let planSet = PLAN;
-try { planSet = setPlan(BRAIN, PLAN, { onlyIfUnset: planAt === -1 }).plan; }
-catch (e) { say('plan not set: ' + e.message + '. Set it later with node tools/plan.mjs ' + PLANS.join(' | ')); }
-
-// ---- semantic recall, ON by default ------------------------------------------------------------
-// Measured on a fresh clone, 2026-09-05: npm install 31s and 284MB, first build 16s including the
-// model download, and then a paraphrase with no word in common finds the right memory. Without
-// this the product is keyword-only, which is half of it. --no-semantic skips it, and the hook says
-// so on every turn rather than pretending.
-if (!NO_SEMANTIC) {
-  const pkg = join(BRAIN, 'node_modules', '@xenova', 'transformers');
-  if (!existsSync(pkg)) {
-    say('installing the embedding model runtime (about 280MB, around half a minute)...');
-    try {
-      execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent'], { cwd: BRAIN, stdio: 'inherit', timeout: 600000, windowsHide: true, shell: process.platform === 'win32' });
-    } catch (e) {
-      say('npm install failed: ' + String(e.message).split(NL)[0]);
-      say('Continuing keyword-only. Run npm install later and then node tools/build-index.mjs.');
-    }
-  }
-}
-
-// ---- build the index, which is what makes any of it findable -------------------------------
 try {
-  const out = execFileSync(process.execPath, [join(BRAIN, 'tools', 'build-index.mjs')], {
-    cwd: BRAIN, encoding: 'utf8', timeout: 300000, windowsHide: true,
-  });
-  for (const line of out.trim().split(NL).slice(-4)) say('  ' + line);
-} catch (e) {
-  say('build-index FAILED: ' + String(e.message).split(NL)[0]);
-  // The first line of the message is only "Command failed"; the cause is in the child's own output.
-  for (const line of String(e.stderr || e.stdout || '').trim().split(NL).slice(-8)) say('  ' + line);
-  say('Nothing is findable until it succeeds. Fix this before going further.');
-  process.exit(1);
+    planSet = setPlan(BRAIN, PLAN, { onlyIfUnset: planAt === -1 }).plan;
 }
-
-// ---- prove it, rather than assume it ----------------------------------------------------------
+catch (e) {
+    say('plan not set: ' + e.message + '. Set it later with node tools/plan.mjs ' + PLANS.join(' | '));
+}
+if (!NO_SEMANTIC) {
+    const pkg = join(BRAIN, 'node_modules', '@xenova', 'transformers');
+    if (!existsSync(pkg)) {
+        say('installing the embedding model runtime (about 280MB, around half a minute)...');
+        try {
+            execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent'], { cwd: BRAIN, stdio: 'inherit', timeout: 600000, windowsHide: true, shell: process.platform === 'win32' });
+        }
+        catch (e) {
+            say('npm install failed: ' + String(e.message).split(NL)[0]);
+            say('Continuing keyword-only. Run npm install later and then node tools/build-index.mjs.');
+        }
+    }
+}
+try {
+    const out = execFileSync(process.execPath, [join(BRAIN, 'tools', 'build-index.mjs')], {
+        cwd: BRAIN, encoding: 'utf8', timeout: 300000, windowsHide: true,
+    });
+    for (const line of out.trim().split(NL).slice(-4))
+        say('  ' + line);
+}
+catch (e) {
+    say('build-index FAILED: ' + String(e.message).split(NL)[0]);
+    for (const line of String(e.stderr || e.stdout || '').trim().split(NL).slice(-8))
+        say('  ' + line);
+    say('Nothing is findable until it succeeds. Fix this before going further.');
+    process.exit(1);
+}
 let rules = 0;
-try { rules = (JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')).rules || []).length; } catch { /* none */ }
+try {
+    rules = (JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')).rules || []).length;
+}
+catch { }
 say('');
 say('rules now active : ' + rules + (rules ? '' : '   <-- still zero, something is wrong'));
 say('plan             : ' + planSet + '   (helpers, models and background work sized to it; change with node tools/plan.mjs)');

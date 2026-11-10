@@ -1,48 +1,10 @@
 #!/usr/bin/env node
-// Update this machine's brain FROM THE the host, with no git.
-//
-// The owner, 2026-08-24: "full brain in the server, the git is just a backup."
-// The owner, 2026-09-04: "forget about github, github should be just a backup, the repo and the memory
-//                    should all run locally syncing fetching etc."
-//
-// WHY THIS EXISTS. The locked-down client machine cannot reach GitHub, blocked on the corporate WiFi. It
-// reaches the brain server fine over Tailscale, so reads and writes already worked, but the code,
-// the certificate, the memories and the index all still arrived only through the repo. If the
-// certificate were ever regenerated, that machine would be locked out permanently with no delivery
-// path left, since Taildrop is dead on that link too. A machine should need nothing but a token
-// and the tailnet.
-//
-// GITHUB IS NOW WRITE-ONLY, AND ONLY FROM the host. No other machine pulls from it or pushes to it.
-// The repo is a disaster copy in case the server is lost, nothing more. Every machine syncs here.
-//
-// WHY A FULL LOCAL COPY RATHER THAN LIVE CALLS. Recall already falls back to the server when a
-// machine holds no index, but that costs a round trip per turn and dies with the tailnet. Holding
-// the real files locally means recall runs at local speed and keeps working offline.
-//
-// WHAT IT DELIBERATELY DOES NOT TOUCH:
-//   vault.json           the server refuses to serve it and this never asks
-//   anything outside the server's published manifest
-//
-// WRITES STILL GO THROUGH THE the host. Never hand-create a file in memory/ on a machine that syncs:
-// this tool treats anything the server does not list as deleted and moves it to .sync-trash/.
-// Write memories with POST /memory so the server owns them, then they come back here.
-//
-// Usage:
-//   node tools/pull-from-server.mjs           update what has changed
-//   node tools/pull-from-server.mjs --check   report only, change nothing
-//   node tools/pull-from-server.mjs --quiet   for the timer: log to file, print nothing, exit 0
-//   node tools/pull-from-server.mjs --force   ignore the cheap version probe, compare every file
-
-import {
-  readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, readdirSync, appendFileSync,
-  statSync,
-} from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, readdirSync, appendFileSync, statSync, } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-
 const BRAIN = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CERT = join(BRAIN, 'server-cert.pem');
 const CHECK = process.argv.includes('--check');
@@ -52,296 +14,268 @@ const NL = String.fromCharCode(10);
 const BS = String.fromCharCode(92);
 const LOG = join(BRAIN, '.pull-from-server.log');
 const STATE = join(BRAIN, '.pull-from-server.state');
-
-// Directories this tool is allowed to consider authoritative, meaning a local file in one of them
-// that the server does not list is treated as deleted. Code directories are NOT in this list: a
-// stray local tool is somebody's work in progress, not garbage.
-//
-// DELIBERATELY EMPTY since 2026-09-04, so nothing is ever swept. It held memory and index for a
-// few hours the same day and that was withdrawn: the brain lives on the server, recall goes to
-// the server, and no machine needs a copy of the memories on disk.
-//
-// Do not refill this without reading reference_git_timer_vs_server_sweep_race. A sweep on a
-// machine that also runs git costs a race, permanent git dirt and a wedged pull.
 const MIRRORED = [];
-
-// If the server lists fewer memories than this, something is wrong with it and we do NOT sweep.
-// Deleting 260 memories because a misconfigured server answered with an empty list is the one
-// failure this tool must never have.
 const MIN_MEMORIES_TO_TRUST = 50;
-
-// A file the server does not list is only swept once it has had time to get there. a laptop client
-// caught this on 2026-09-04: a machine running BOTH this mirror and a git timer has two writers,
-// and the git one can deliver a memory the server has not ingested yet.
-//
-//   minute 0  another machine commits a memory, a laptop client git-pulls it into memory/
-//   minute 1  this mirror sees a file the server does not list, and sweeps it
-//
-// MIN_MEMORIES_TO_TRUST does not catch that: it is one file, not a mass wipe, so it is silent.
-// The real fix is that no machine should have a second writer, but correctness must not depend on
-// every machine being configured right. Anything touched recently gets a grace period, which is
-// long enough for the server to catch up through any path. A genuinely deleted memory was last
-// written when it was synced, hours or days ago, so it still goes.
 const SWEEP_GRACE_MS = 10 * 60 * 1000;
-
 function out(s) {
-  if (!QUIET) process.stdout.write(s + NL);
-  try {
-    if (existsSync(LOG) && statSync(LOG).size > 1024 * 1024) writeFileSync(LOG, '');
-    appendFileSync(LOG, new Date().toISOString() + String.fromCharCode(9) + s + NL);
-  } catch { /* a full disk must not crash the timer */ }
+    if (!QUIET)
+        process.stdout.write(s + NL);
+    try {
+        if (existsSync(LOG) && statSync(LOG).size > 1024 * 1024)
+            writeFileSync(LOG, '');
+        appendFileSync(LOG, new Date().toISOString() + String.fromCharCode(9) + s + NL);
+    }
+    catch { }
 }
-// In quiet mode nothing is a failure worth a red mark in Task Scheduler: the next run retries.
 const done = (code) => process.exit(QUIET ? 0 : code);
-
 const CONFIG_DIR = process.env.HAVOK_HOME || resolve(homedir(), '.claude');
 let token = '';
-try { token = readFileSync(join(CONFIG_DIR, 'havok-server-token'), 'utf8').trim(); } catch { /* none */ }
-if (!token) {
-  out('NO TOKEN on this machine, at ' + join(CONFIG_DIR, 'havok-server-token') + '.');
-  out('Ask the owner to arm a bootstrap, then collect it. Not calling with an empty credential, because');
-  out('the 401 would look like the server being down.');
-  done(1);
+try {
+    token = readFileSync(join(CONFIG_DIR, 'havok-server-token'), 'utf8').trim();
 }
-
+catch { }
+if (!token) {
+    out('NO TOKEN on this machine, at ' + join(CONFIG_DIR, 'havok-server-token') + '.');
+    out('Ask the person to arm a bootstrap, then collect it. Not calling with an empty credential, because');
+    out('the 401 would look like the server being down.');
+    done(1);
+}
 let base = process.env.HAVOK_SERVER_URL;
 if (!base) {
-  try { base = JSON.parse(readFileSync(join(BRAIN, 'server-endpoint.json'), 'utf8')).url; } catch { /* none */ }
+    try {
+        base = JSON.parse(readFileSync(join(BRAIN, 'server-endpoint.json'), 'utf8')).url;
+    }
+    catch { }
 }
-if (!base) { out('no server endpoint published, cannot update'); done(1); }
-while (base.endsWith('/')) base = base.slice(0, -1);
-
-// VERIFY AGAINST THE NAME, CONNECT TO THE IP.
-//
-// server-endpoint.json publishes the tailnet IP, and the certificate does carry that IP as a
-// SAN, but an OLD curl will not match it: the 2023 build in C:\Windows\System32 fails with
-// schannel "CertGetNameString() failed to match connection hostname", exit 60, every time. See
-// reference_curl_schannel_ip_cert_mismatch. Which curl is first on PATH decides whether this
-// tool works, which is not a thing any tool should depend on.
-//
-// Found for real on 2026-09-15: the locked-down client machine could push memories and recall fine while
-// THIS tool reported "server unreachable", so that machine could never self-update its hooks and
-// sat on a version from 2026-09-07 with nobody noticing.
-//
-// --connect-to makes the request carry the MagicDNS name for SNI and certificate matching while
-// the socket still goes to the IP, so it needs no DNS (Tailscale DNS is deliberately off here)
-// and no IP-SAN support. Works on both curls.
+if (!base) {
+    out('no server endpoint published, cannot update');
+    done(1);
+}
+while (base.endsWith('/'))
+    base = base.slice(0, -1);
 let magic = '';
-try { magic = JSON.parse(readFileSync(join(BRAIN, 'server-endpoint.json'), 'utf8')).tailnet.magicdns || ''; } catch { /* older endpoint file */ }
+try {
+    magic = JSON.parse(readFileSync(join(BRAIN, 'server-endpoint.json'), 'utf8')).tailnet.magicdns || '';
+}
+catch { }
 const ipHost = (base.match(/^https?:\/\/([^:/]+)(?::(\d+))?/) || []);
 const useConnectTo = Boolean(magic && ipHost[1] && /^[0-9.]+$/.test(ipHost[1]));
 const namedBase = useConnectTo ? 'https://' + magic + (ipHost[2] ? ':' + ipHost[2] : '') : base;
-
-// Token in a curl config on stdin, never argv.
 function fetch(path, binary) {
-  const conf = [
-    'header = "Authorization: Bearer ' + token + '"',
-    'url = "' + namedBase + path + '"',
-    'silent', 'connect-timeout = 5', 'max-time = 60',
-  ];
-  if (useConnectTo) {
-    conf.push('connect-to = "' + magic + ':' + ipHost[2] + ':' + ipHost[1] + ':' + ipHost[2] + '"');
-  }
-  if (base.slice(0, 6).toLowerCase() === 'https:' && existsSync(CERT)) {
-    conf.push('cacert = "' + CERT.split(BS).join('/') + '"');
-  }
-  return execFileSync('curl', ['-K', '-'], {
-    input: conf.join(NL) + NL,
-    encoding: binary ? null : 'utf8',
-    windowsHide: true, timeout: 65000,
-    stdio: ['pipe', 'pipe', 'ignore'],
-  });
+    const conf = [
+        'header = "Authorization: Bearer ' + token + '"',
+        'url = "' + namedBase + path + '"',
+        'silent', 'connect-timeout = 5', 'max-time = 60',
+    ];
+    if (useConnectTo) {
+        conf.push('connect-to = "' + magic + ':' + ipHost[2] + ':' + ipHost[1] + ':' + ipHost[2] + '"');
+    }
+    if (base.slice(0, 6).toLowerCase() === 'https:' && existsSync(CERT)) {
+        conf.push('cacert = "' + CERT.split(BS).join('/') + '"');
+    }
+    return execFileSync('curl', ['-K', '-'], {
+        input: conf.join(NL) + NL,
+        encoding: binary ? null : 'utf8',
+        windowsHide: true, timeout: 65000,
+        stdio: ['pipe', 'pipe', 'ignore'],
+    });
 }
-
-// ---- 1. Cheap probe first -----------------------------------------------------------------
-// The manifest is ~35KB and makes the server hash every file. On a two-minute timer that is
-// pure waste, since almost every run has nothing to do. /dist/version is a stat-only digest.
-//
-// THE SERVER NOT CHANGING DOES NOT MEAN THIS DISK DID NOT. The state file used to hold only the
-// server's version, so "already current" meant "the server has not moved since I last synced",
-// never "my files are what the server has". On a laptop client, 2026-09-17, session start ran
-// unwedge-pull, which moved 5 mirror-delivered tools aside and reset 15 others to an old git
-// commit, and then the git pull failed on unrelated histories. The mirror kept saying already
-// current, every minute, over 20 stale or missing files, including the hook fix it was meant to
-// deliver. So the state now also records a stat digest of the files it wrote, and the probe skips
-// only when both still match.
 function localDigest(paths) {
-  const h = createHash('sha256');
-  for (const rel of [...paths].sort()) {
-    try {
-      const st = statSync(join(BRAIN, rel));
-      h.update(rel + ':' + st.size + ':' + Math.floor(st.mtimeMs) + '|');
-    } catch { h.update(rel + ':absent|'); }
-  }
-  return h.digest('hex').slice(0, 16);
+    const h = createHash('sha256');
+    for (const rel of [...paths].sort()) {
+        try {
+            const st = statSync(join(BRAIN, rel));
+            h.update(rel + ':' + st.size + ':' + Math.floor(st.mtimeMs) + '|');
+        }
+        catch {
+            h.update(rel + ':absent|');
+        }
+    }
+    return h.digest('hex').slice(0, 16);
 }
 function saveState(remote, paths) {
-  try { writeFileSync(STATE, JSON.stringify({ remote, local: localDigest(paths), paths })); } catch { /* not fatal */ }
+    try {
+        writeFileSync(STATE, JSON.stringify({ remote, local: localDigest(paths), paths }));
+    }
+    catch { }
 }
-
 let remoteVersion = null;
 if (!FORCE) {
-  try {
-    const v = JSON.parse(fetch('/dist/version') || '{}');
-    if (v && v.version) {
-      remoteVersion = v.version;
-      let seen = null;
-      try { seen = JSON.parse(readFileSync(STATE, 'utf8')); } catch { /* first run, or the old bare-version format */ }
-      if (seen && seen.remote === remoteVersion && Array.isArray(seen.paths)
-        && seen.local === localDigest(seen.paths)) {
-        if (!QUIET) out('already current (version ' + remoteVersion + ', ' + v.files + ' files)');
-        done(0);
-      }
+    try {
+        const v = JSON.parse(fetch('/dist/version') || '{}');
+        if (v && v.version) {
+            remoteVersion = v.version;
+            let seen = null;
+            try {
+                seen = JSON.parse(readFileSync(STATE, 'utf8'));
+            }
+            catch { }
+            if (seen && seen.remote === remoteVersion && Array.isArray(seen.paths)
+                && seen.local === localDigest(seen.paths)) {
+                if (!QUIET)
+                    out('already current (version ' + remoteVersion + ', ' + v.files + ' files)');
+                done(0);
+            }
+        }
     }
-  } catch { /* old server with no version route, or unreachable: fall through to the manifest */ }
+    catch { }
 }
-
 let manifest;
-try { manifest = JSON.parse(fetch('/dist')); }
-catch { out('server unreachable at ' + base + ', nothing changed'); done(1); }
-if (!manifest || !Array.isArray(manifest.files)) {
-  out('the server did not return a manifest. If this is a 403, this machine may not be permitted.');
-  done(1);
+try {
+    manifest = JSON.parse(fetch('/dist'));
 }
-
-// ---- 2. What differs ------------------------------------------------------------------------
+catch {
+    out('server unreachable at ' + base + ', nothing changed');
+    done(1);
+}
+if (!manifest || !Array.isArray(manifest.files)) {
+    out('the server did not return a manifest. If this is a 403, this machine may not be permitted.');
+    done(1);
+}
 const sha16 = (buf) => createHash('sha256').update(buf).digest('hex').slice(0, 16);
 const stale = [];
 for (const f of manifest.files) {
-  let mine = null;
-  try { mine = readFileSync(join(BRAIN, f.path)); } catch { /* missing counts as stale */ }
-  if (!mine || sha16(mine) !== f.sha) stale.push({ ...f, missing: !mine });
+    let mine = null;
+    try {
+        mine = readFileSync(join(BRAIN, f.path));
+    }
+    catch { }
+    if (!mine || sha16(mine) !== f.sha)
+        stale.push({ ...f, missing: !mine });
 }
-
-// ---- 3. What the server has deleted ----------------------------------------------------------
-// A superseded memory has to disappear everywhere, or two machines answer the same question
-// differently and neither of them is obviously wrong. Only memory/ and index/ are swept.
 const published = new Set(manifest.files.map((f) => f.path));
 const memoryCount = manifest.files.filter((f) => f.path.slice(0, 7) === 'memory/').length;
 const orphans = [];
 const spared = [];
 if (memoryCount >= MIN_MEMORIES_TO_TRUST) {
-  for (const d of MIRRORED) {
-    let names = [];
-    try { names = readdirSync(join(BRAIN, d)); } catch { continue; }
-    for (const n of names) {
-      const rel = d + '/' + n;
-      const isSyncable = n.slice(-3) === '.md' || n.slice(-5) === '.json';
-      if (!isSyncable || published.has(rel)) continue;
-      let age = Infinity;
-      try { age = Date.now() - statSync(join(BRAIN, rel)).mtimeMs; } catch { /* unreadable, treat as old */ }
-      if (age < SWEEP_GRACE_MS) {
-        spared.push(rel + ' (' + Math.round(age / 1000) + 's old)');
-        continue;
-      }
-      orphans.push(rel);
+    for (const d of MIRRORED) {
+        let names = [];
+        try {
+            names = readdirSync(join(BRAIN, d));
+        }
+        catch {
+            continue;
+        }
+        for (const n of names) {
+            const rel = d + '/' + n;
+            const isSyncable = n.slice(-3) === '.md' || n.slice(-5) === '.json';
+            if (!isSyncable || published.has(rel))
+                continue;
+            let age = Infinity;
+            try {
+                age = Date.now() - statSync(join(BRAIN, rel)).mtimeMs;
+            }
+            catch { }
+            if (age < SWEEP_GRACE_MS) {
+                spared.push(rel + ' (' + Math.round(age / 1000) + 's old)');
+                continue;
+            }
+            orphans.push(rel);
+        }
     }
-  }
-} else if (MIRRORED.length && manifest.files.length) {
-  out('NOT sweeping deletions: the server listed only ' + memoryCount + ' memories, below the '
-    + MIN_MEMORIES_TO_TRUST + ' needed to trust it. Files were updated, none removed.');
 }
-
-for (const p of spared) out('held back, too recent to be sure it is a deletion: ' + p);
-
-// The mod's shared context layers (layers/) are swept on their own, outside MIRRORED: no agent writes them on
-// a mirror (an agent's own layer lives in its local folder), and a layer removed on the host must leave this machine
-// or a retracted rule stays in every prompt here. Loaded softly: a run whose copy of layers-dist.mjs has not arrived
-// yet updates the files and sweeps on the next run.
+else if (MIRRORED.length && manifest.files.length) {
+    out('NOT sweeping deletions: the server listed only ' + memoryCount + ' memories, below the '
+        + MIN_MEMORIES_TO_TRUST + ' needed to trust it. Files were updated, none removed.');
+}
+for (const p of spared)
+    out('held back, too recent to be sure it is a deletion: ' + p);
 try {
-  const { layerOrphans } = await import('./layers-dist.mjs');
-  for (const rel of layerOrphans(BRAIN, published)) orphans.push(rel);
-} catch { /* layers-dist.mjs not here yet */ }
-
-// A file the server sent before and no longer lists was removed on the server (2026-11-02: two hooks removed there
-// stayed on a laptop's mirror, which is its plugin source, so every plugin update copied them back). Only paths this tool itself recorded as delivered are candidates, so a file
-// made on this machine is never touched; they go to .sync-trash/ like every removal. A manifest less than half the
-// size of the previous one is not trusted for this.
+    const { layerOrphans } = await import('./layers-dist.mjs');
+    for (const rel of layerOrphans(BRAIN, published))
+        orphans.push(rel);
+}
+catch { }
 try {
-  const prev = JSON.parse(readFileSync(STATE, 'utf8'));
-  const prevPaths = Array.isArray(prev && prev.paths) ? prev.paths : [];
-  if (prevPaths.length && manifest.files.length >= prevPaths.length / 2) {
-    const have = new Set(orphans);
-    for (const rel of prevPaths) {
-      if (typeof rel !== 'string' || published.has(rel) || have.has(rel) || rel.includes('..')) continue;
-      if (existsSync(join(BRAIN, rel))) orphans.push(rel);
+    const prev = JSON.parse(readFileSync(STATE, 'utf8'));
+    const prevPaths = Array.isArray(prev && prev.paths) ? prev.paths : [];
+    if (prevPaths.length && manifest.files.length >= prevPaths.length / 2) {
+        const have = new Set(orphans);
+        for (const rel of prevPaths) {
+            if (typeof rel !== 'string' || published.has(rel) || have.has(rel) || rel.includes('..'))
+                continue;
+            if (existsSync(join(BRAIN, rel)))
+                orphans.push(rel);
+        }
     }
-  } else if (prevPaths.length) {
-    out('NOT removing files the server dropped: its list has ' + manifest.files.length + ' files, against '
-      + prevPaths.length + ' last time.');
-  }
-} catch { /* no state yet: nothing was delivered by this tool before */ }
-
+    else if (prevPaths.length) {
+        out('NOT removing files the server dropped: its list has ' + manifest.files.length + ' files, against '
+            + prevPaths.length + ' last time.');
+    }
+}
+catch { }
 if (!stale.length && !orphans.length) {
-  if (remoteVersion) saveState(remoteVersion, manifest.files.map((f) => f.path));
-  if (!QUIET) out('already current: ' + manifest.files.length + ' files match the server');
-  done(0);
+    if (remoteVersion)
+        saveState(remoteVersion, manifest.files.map((f) => f.path));
+    if (!QUIET)
+        out('already current: ' + manifest.files.length + ' files match the server');
+    done(0);
 }
-
 if (!QUIET || CHECK) {
-  if (stale.length) {
-    out(stale.length + ' file(s) differ from the server:');
-    for (const f of stale.slice(0, 40)) out('   ' + (f.missing ? 'MISSING ' : 'stale   ') + f.path);
-    if (stale.length > 40) out('   ... and ' + (stale.length - 40) + ' more');
-  }
-  if (orphans.length) {
-    out(orphans.length + ' local file(s) the server no longer has:');
-    for (const p of orphans.slice(0, 40)) out('   deleted ' + p);
-  }
+    if (stale.length) {
+        out(stale.length + ' file(s) differ from the server:');
+        for (const f of stale.slice(0, 40))
+            out('   ' + (f.missing ? 'MISSING ' : 'stale   ') + f.path);
+        if (stale.length > 40)
+            out('   ... and ' + (stale.length - 40) + ' more');
+    }
+    if (orphans.length) {
+        out(orphans.length + ' local file(s) the server no longer has:');
+        for (const p of orphans.slice(0, 40))
+            out('   deleted ' + p);
+    }
 }
-if (CHECK) { out('--check: nothing changed'); done(1); }
-
-// ---- 4. Apply -------------------------------------------------------------------------------
+if (CHECK) {
+    out('--check: nothing changed');
+    done(1);
+}
 let fixed = 0;
 for (const f of stale) {
-  try {
-    const buf = fetch('/dist/' + encodeURIComponent(f.path).split('%2F').join('/'), true);
-    // Verify BEFORE replacing. A truncated download must never overwrite a working hook.
-    if (sha16(buf) !== f.sha) { out('   ' + f.path + ': download does not match the published hash, left alone'); continue; }
-    const dest = join(BRAIN, f.path);
-    mkdirSync(dirname(dest), { recursive: true });
-    // The temp file MUST sit beside the destination. It used to be written to tmpdir(), which is
-    // on C: while the brain is on D:, and renameSync across volumes fails with EXDEV. Because the
-    // rename sat inside this try, that surfaced as "fetch failed" and looked like a network fault.
-    const tmp = dest + '.tmp-' + process.pid;
-    writeFileSync(tmp, buf);
-    renameSync(tmp, dest);
-    fixed++;
-  } catch (e) {
-    out('   ' + f.path + ': update failed, left alone (' + String(e.message).split(NL)[0].slice(0, 80) + ')');
-  }
+    try {
+        const buf = fetch('/dist/' + encodeURIComponent(f.path).split('%2F').join('/'), true);
+        if (sha16(buf) !== f.sha) {
+            out('   ' + f.path + ': download does not match the published hash, left alone');
+            continue;
+        }
+        const dest = join(BRAIN, f.path);
+        mkdirSync(dirname(dest), { recursive: true });
+        const tmp = dest + '.tmp-' + process.pid;
+        writeFileSync(tmp, buf);
+        renameSync(tmp, dest);
+        fixed++;
+    }
+    catch (e) {
+        out('   ' + f.path + ': update failed, left alone (' + String(e.message).split(NL)[0].slice(0, 80) + ')');
+    }
 }
-
-// Removals go to .sync-trash/, never to unlink. If this tool is ever wrong about what the server
-// holds, the cost must be a folder to inspect and not a lost memory.
 let removed = 0;
 if (orphans.length) {
-  const stampSrc = new Date().toISOString();
-  let stamp = '';
-  for (const ch of stampSrc) stamp += (ch === ':' || ch === '.') ? '-' : ch;
-  const trash = join(BRAIN, '.sync-trash', stamp);
-  for (const rel of orphans) {
-    try {
-      const dest = join(trash, rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      renameSync(join(BRAIN, rel), dest);
-      removed++;
-    } catch (e) {
-      out('   ' + rel + ': could not move to trash, left in place (' + String(e.message).split(NL)[0].slice(0, 60) + ')');
+    const stampSrc = new Date().toISOString();
+    let stamp = '';
+    for (const ch of stampSrc)
+        stamp += (ch === ':' || ch === '.') ? '-' : ch;
+    const trash = join(BRAIN, '.sync-trash', stamp);
+    for (const rel of orphans) {
+        try {
+            const dest = join(trash, rel);
+            mkdirSync(dirname(dest), { recursive: true });
+            renameSync(join(BRAIN, rel), dest);
+            removed++;
+        }
+        catch (e) {
+            out('   ' + rel + ': could not move to trash, left in place (' + String(e.message).split(NL)[0].slice(0, 60) + ')');
+        }
     }
-  }
-  if (removed) out('moved ' + removed + ' removed file(s) to .sync-trash/' + stamp);
+    if (removed)
+        out('moved ' + removed + ' removed file(s) to .sync-trash/' + stamp);
 }
-
 const okAll = fixed === stale.length && removed === orphans.length;
 out('updated ' + fixed + ' of ' + stale.length + ' file(s), removed ' + removed + ' of '
-  + orphans.length + ', from ' + base);
-
-// Only record the version once everything actually landed, so a partial run retries next time.
-if (remoteVersion && okAll) saveState(remoteVersion, manifest.files.map((f) => f.path));
-
+    + orphans.length + ', from ' + base);
+if (remoteVersion && okAll)
+    saveState(remoteVersion, manifest.files.map((f) => f.path));
 if (fixed && stale.some((f) => f.path.slice(0, 6) === 'hooks/')) {
-  out('NOTE: hooks changed. A running Claude Code session loads hooks at start, so restart the');
-  out('session or they will not take effect this turn.');
+    out('NOTE: hooks changed. A running Claude Code session loads hooks at start, so restart the');
+    out('session or they will not take effect this turn.');
 }
 done(okAll ? 0 : 1);

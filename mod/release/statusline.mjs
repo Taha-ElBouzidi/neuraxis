@@ -203,12 +203,14 @@ const firstLineParts = parts.length;
     catch { }
     parts.push(seg);
 }
-const proxyFile = (() => { try {
-    return String(JSON.parse(readFileSync(join(process.env.USERPROFILE || process.env.HOME || homedir(), ".claude", "havok-mod", "machine.json"), "utf8")).checks?.proxyStateFile || "");
-}
-catch {
-    return "";
-} })();
+const proxyFile = (() => {
+    try {
+        return String(JSON.parse(readFileSync(join(process.env.USERPROFILE || process.env.HOME || homedir(), ".claude", "havok-mod", "machine.json"), "utf8")).checks?.proxyStateFile || "");
+    }
+    catch {
+        return "";
+    }
+})();
 if (proxyFile && existsSync(proxyFile)) {
     let seg = `${c.dim}VPN${c.reset} ${c.dim}?${c.reset}`;
     try {
@@ -293,18 +295,22 @@ catch { }
 function heldByReserve() {
     const userHome = process.env.USERPROFILE || homedir();
     const claude = join(userHome, ".claude");
-    const readText = (f) => { try {
-        return readFileSync(f, "utf8").trim();
-    }
-    catch {
-        return "";
-    } };
-    const json = (f) => { try {
-        return JSON.parse(readText(f) || "null");
-    }
-    catch {
-        return null;
-    } };
+    const readText = (f) => {
+        try {
+            return readFileSync(f, "utf8").trim();
+        }
+        catch {
+            return "";
+        }
+    };
+    const json = (f) => {
+        try {
+            return JSON.parse(readText(f) || "null");
+        }
+        catch {
+            return null;
+        }
+    };
     const plugin = (json(join(claude, "plugins", "installed_plugins.json"))?.plugins?.["havok-brain@havok-brain"] || []).find((x) => x && x.installPath);
     const brainDir = readText(join(claude, "havok-brain-path")).split(/\r?\n/)[0].trim() || String(plugin?.installPath || "");
     const accounts = (brainDir && json(join(brainDir, "brain.json"))?.limitReserve?.accounts) || {};

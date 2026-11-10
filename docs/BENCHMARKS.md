@@ -8,11 +8,10 @@ estimated.
 
 ## The corpus and the questions
 
-The authors' own brain: **274 memories**, and a fixed set of **41 questions** phrased the way the
-owner actually types, including terse and misspelled ones, each with the memory that should come
-back. A benchmark written in tidy English measures a system nobody uses. The set is private, because
-the questions name real people; a generic set of 22 questions targeting the eight seed rules and the 14 how-to memories ships with the code and
-`eval-recall.mjs` uses it when no private set is present.
+A test brain of **274 memories**, and a fixed set of **41 questions** written the way people really type,
+including terse and misspelled ones, each with the memory that should come back. A benchmark written in
+tidy English measures a system nobody uses. A generic set of 22 questions targeting the eight seed rules and the
+14 how-to memories ships with the code, and `eval-recall.mjs` uses it when no question set of your own is present.
 
 Machine: a desktop, Windows 11, Node 24. Every run below is the real hook end to end, the way a
 prompt pays for it, not a bare HTTP call.
@@ -32,12 +31,10 @@ locked out so it could not start itself.
 | tokens injected per prompt | 1735 | 1789 |
 
 What meaning buys: two more questions out of 41 find their memory, and no prompt comes back empty.
-What it costs: about 95ms per prompt and a one-time 280MB runtime. The three keyword-only misses
-were *"dont ask me where the money came from"*, *"how much am i owed from my internship"* and
-*"stop writing so much"*; meaning recovered the first two.
+What it costs: about 95ms per prompt and a one-time 280MB runtime. Three questions missed in keyword-only mode; meaning recovered two of them.
 
-The remaining miss in both modes, *"stop writing so much"*, wants a memory about reply length and
-gets five other memories about reply style instead. A near miss, counted as a miss.
+The remaining miss in both modes is a very short request about reply length that gets five memories about
+reply style instead. A near miss, counted as a miss.
 
 Commands: `node tools/eval-recall.mjs` and `node tools/bench-recall.mjs --runs 2`.
 

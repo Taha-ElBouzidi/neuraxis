@@ -20,8 +20,10 @@ export function messageIdsOf(text: string): string[] {
 }
 export function commitsOf(command: string, output: string): string[] {
     const out: string[] = [];
-    const add = (h: string) => { if (!out.includes(h))
-        out.push(h); };
+    const add = (h: string) => {
+        if (!out.includes(h))
+            out.push(h);
+    };
     const text = String(output ?? '');
     for (const m of text.matchAll(/^\[[^\]\n]*? ([0-9a-f]{7,12})\] /gm))
         add(m[1]!);

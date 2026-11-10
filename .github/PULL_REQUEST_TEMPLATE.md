@@ -23,5 +23,5 @@
 - [ ] Any latency or accuracy claim comes with the command that produced it
 - [ ] Scope is minimal: no unrelated refactoring included
 - [ ] `.project/STRUCTURE.md` updated if files were added, moved, or deleted
-- [ ] CLA signed (the bot will ask on your first pull request)
+- [ ] CLA signed, see .github/CLA.md (the bot will ask on your first pull request)
 - [ ] Draft PR converted to ready only when all boxes are checked

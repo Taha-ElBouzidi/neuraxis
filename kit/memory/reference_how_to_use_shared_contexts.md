@@ -5,9 +5,9 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-11-02
-  updated: 2026-11-02
-  kit_version: 1
-  kit_hash: 2366e753685819cf
+  updated: 2026-11-10
+  kit_version: 2
+  kit_hash: 4773328b226e5d77
 ---
 
 # How to use the shared contexts
@@ -46,9 +46,9 @@ context_keep pins one fact, in one or two lines, to the agent's own level. It is
 - Agent: the agent itself.
 - Group: the group's owner; its members propose.
 - Machine: the person or lead agent responsible for the machine; the agents on it propose.
-- Global: the owner of the install, through the main assistant; every agent proposes.
+- Global: the person who set up the install, through the main assistant; every agent proposes.
 
-To propose a change, send the owner of that level the line and the reason (see [[reference_how_to_message_another_agent]]). The owner approves the rendered text of every shared level before it is saved, because every agent that reads it pays for it on every step.
+To propose a change, send the owner of that level the line and the reason (see [[reference_how_to_message_another_agent]]). The context owner approves the rendered text of every shared level before it is saved, because every agent that reads it pays for it on every step.
 
 Mistakes that show up: an ordinary edit marked urgent, a fact pinned every few turns, and a shared level edited without its owner.
 

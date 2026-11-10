@@ -12,7 +12,7 @@ Replace each line below with the real text, keep the headings in this order, and
 
 ## Addresses
 - Say how agents here reach this machine's own services (local address and port): <local address of each service>.
-- Say which addresses the owner uses from other devices, and which names work from elsewhere but not from this machine.
+- Say which addresses the person uses from other devices, and which names work from elsewhere but not from this machine.
 
 ## Shells and admin
 - Name the shells available here, their versions, and what differs from the usual (quoting, paths, encoding).

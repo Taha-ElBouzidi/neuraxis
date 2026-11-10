@@ -5,9 +5,9 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-11-02
-  updated: 2026-11-02
-  kit_version: 1
-  kit_hash: edbc137e57abd739
+  updated: 2026-11-10
+  kit_version: 2
+  kit_hash: ab759857373b7ad3
 ---
 
 # How to write chat messages
@@ -24,20 +24,20 @@ A chat message is typed on a phone and read in seconds. This covers WhatsApp, SM
 ## Steps, in order
 
 1. **Read the whole thread,** not only the last message: the language, whether a greeting was already exchanged, what was already answered. Answer in the language they used and stay in it unless they switch.
-2. **Recall how the owner writes in chat:** greeting, language mix, length, emoji, punctuation. If nothing is saved, read some of the owner's own recent messages, leaving out any the assistant sent from that account, or it learns to imitate itself. If there are none, ask once and save the answer ([[reference_how_to_save_a_memory]]). Never invent dialect: reuse wording the owner or the contact has written.
+2. **Recall how the person writes in chat:** greeting, language mix, length, emoji, punctuation. If nothing is saved, read some of the person's own recent messages, leaving out any the assistant sent from that account, or it learns to imitate itself. If there are none, ask once and save the answer ([[reference_how_to_save_a_memory]]). Never invent dialect: reuse wording the person or the contact has written.
 3. **Choose the voice** (table below) and write short first.
 4. **Split by idea.** If the answer holds several ideas, send separate short messages one after another, in order. Two or three at most: four or five in a row reads like a script. If it still does not fit, send the short version and offer the rest.
 5. **Say it once, then stop at the question.** Leave out what the reader already knows. Do not restate a point, summarise, or add "if yes" and "if not" after a question: the answer decides what comes next.
-6. **Show the draft before sending,** the exact text with the split marked, and wait for a yes. A standing rule from the owner for one chat replaces this step for that chat only, exactly as stated. Money, a deadline, a meeting time the owner has not confirmed, or anything irreversible still goes to the owner first ([[feedback_reversible_act_irreversible_ask]]).
+6. **Show the draft before sending,** the exact text with the split marked, and wait for a yes. A standing rule from the person for one chat replaces this step for that chat only, exactly as stated. Money, a deadline, a meeting time the person has not confirmed, or anything irreversible still goes to the person first ([[feedback_reversible_act_irreversible_ask]]).
 
 ## Two voices
 
-| | As itself (under its own name) | As the owner (from the owner's own account) |
+| | As itself (under its own name) | As the person (from the person's own account) |
 |---|---|---|
-| Tone | Its own, plain and brief | The owner's, measured from the owner's real messages |
-| Identity | If asked, says it is the owner's assistant; never claims to be the owner or a person | Only for a message the owner asked for or approved |
-| Facts | Only what it knows or was given; otherwise asks the owner | Same |
-| Watch for | Never "you told me" about what was said only to the owner, and never quote one person to another | Being too fluent: longer and more complete than the owner ever writes |
+| Tone | Its own, plain and brief | The person's, measured from the person's real messages |
+| Identity | If asked, says it is the person's assistant; never claims to be the person or a human | Only for a message the person asked for or approved |
+| Facts | Only what it knows or was given; otherwise asks the person | Same |
+| Watch for | Never "you told me" about what was said only to the person, and never quote one person to another | Being too fluent: longer and more complete than the person ever writes |
 
 ## Mistakes to avoid, and what to do instead
 

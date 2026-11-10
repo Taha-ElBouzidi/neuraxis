@@ -5,9 +5,9 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-11-02
-  updated: 2026-11-02
-  kit_version: 1
-  kit_hash: 8dad6218bd069d7d
+  updated: 2026-11-10
+  kit_version: 2
+  kit_hash: c9d8b9765917d12e
 ---
 
 # How to use the brain
@@ -18,7 +18,7 @@ The brain is a folder of Markdown memories, one fact per file. It is a recall sy
 
 - At session start read `REFLEX.md` and `memory/MEMORY.md` in the brain folder and nothing else. The rest is recalled when a task needs it.
 - Every message arrives with a `BRAIN RECALL` block from a hook, below the standing rules: memory names with the first words of their descriptions. Before answering, open each memory that could change what you do, using the path given. A description says whether a file is worth opening, never what it says.
-- Before a task, ask the brain again in your own words. The hook searched the owner's raw message, which may be short or vague; you know the task.
+- Before a task, ask the brain again in your own words. The hook searched the person's raw message, which may be short or vague; you know the task.
 - Brain first, other sources second. Say so when the brain had nothing.
 
 ## Search in your own words
@@ -31,7 +31,7 @@ The brain is a folder of Markdown memories, one fact per file. It is a recall sy
 
 Ask one full plain-English question per separate need, with names spelled out and "it" replaced by what it refers to. Add `--learned "<one sentence>"` for anything learned or corrected since the last message: the answer lists the closest existing memories, so you update one instead of writing a duplicate. Open a result with `node tools/brain-client.mjs read <memory-name>` or your file tool.
 
-A single-machine install has no brain server, so `search` ends with "the brain server did not answer". The owner can run `node tools/setup-agents.mjs --check` to see how the `recall` tool would be added.
+A single-machine install has no brain server, so `search` ends with "the brain server did not answer". The person can run `node tools/setup-agents.mjs --check` to see how the `recall` tool would be added.
 
 ## When recall or the server is unavailable
 
@@ -45,11 +45,11 @@ Say so in your first sentence, before the answer. An answer from degraded memory
 
 ## Save what you learn
 
-Write a decision, a correction or a fact about a system in the turn it becomes true: one fact per memory, a description in the owner's words, a link to a related memory. Then run `node tools/build-index.mjs` so recall can find it. With a brain server, use `node tools/brain-client.mjs write <memory-name> --file <path>` instead; it refuses a bad file with the reason and writes nothing. Format and duplicate check: [[reference_how_to_save_a_memory]]. Keep the fact in the brain only, not also in the assistant's built-in memory, because two stores drift apart.
+Write a decision, a correction or a fact about a system in the turn it becomes true: one fact per memory, a description in the person's words, a link to a related memory. Then run `node tools/build-index.mjs` so recall can find it. With a brain server, use `node tools/brain-client.mjs write <memory-name> --file <path>` instead; it refuses a bad file with the reason and writes nothing. Format and duplicate check: [[reference_how_to_save_a_memory]]. Keep the fact in the brain only, not also in the assistant's built-in memory, because two stores drift apart.
 
 ## Memory is a snapshot
 
-A memory records what was true on the date in its header. Before acting on a file, function, setting, price or status that a memory names, check it in the present: open the file, run the command, read the setting. If it no longer matches, tell the owner and replace the memory, so two versions never disagree.
+A memory records what was true on the date in its header. Before acting on a file, function, setting, price or status that a memory names, check it in the present: open the file, run the command, read the setting. If it no longer matches, tell the person and replace the memory, so two versions never disagree.
 
 ## Mistakes to avoid
 

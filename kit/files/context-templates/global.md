@@ -3,7 +3,7 @@
 Replace each line below with the real text, keep the headings in this order, and delete this line. Keep the finished file under about 2,000 tokens.
 
 ## Who you are
-- Say in one line who the assistant is and whom it works for: <assistant name>, <owner name>'s AI.
+- Say in one line who the assistant is and whom it works for: <assistant name>, <the person's name>'s AI.
 - List the machines and the agents, one per line with what each is for, say which agent is the main one, and add a line saying to add every new entry.
 
 ## The brain is your memory
@@ -11,10 +11,10 @@ Replace each line below with the real text, keep the headings in this order, and
 - Say to save the moment something becomes true and lasting. Give the memory format in a short block, the duplicate check (<duplicate check command>) and the save command (<save command>).
 
 ## Where things live
-- Name where shared code (<where shared code lives>), secrets (<where secrets live>) and reports for <owner name> live, with the command for each.
+- Name where shared code (<where shared code lives>), secrets (<where secrets live>) and reports for <the person's name> live, with the command for each.
 - Say how to reach another agent: <message command>.
 
-## How to talk to <owner name>
+## How to talk to <the person's name>
 - Say how a report is ordered, and to say in the same sentence what was checked and what was not.
 - Give the language to use, and say to check a claim that something is broken before answering.
 

@@ -47,7 +47,7 @@ to read is missing, say which one.
 
 ## 3. The install conversation: ask before installing
 
-Ask these seven, one or two at a time, in plain words. Nothing installs before the answers. When the person does not
+Ask these eight, one or two at a time, in plain words. Nothing installs before the answers. When the person does not
 know, take the default in brackets and say so.
 
 1. **Which assistant do you use?** Claude Code, Codex, Gemini CLI or Antigravity, or another (Cursor, Claude Desktop,
@@ -63,6 +63,8 @@ know, take the default in brackets and say so.
 6. **Updates: automatic, tell me first, or off?** (automatic) See section 5.
 7. **Where should it live?** (a folder named `neuraxis` in their home folder) The memory lives there, so it is their
    choice, not the folder you happened to start in.
+8. **Do you want your assistant to follow a strict plain-writing style?** (no) With yes, the hooks refuse em dashes,
+   emoji, arrows, checkmarks and slang in what it writes: `node tools/writing-style.mjs plain` after init.
 
 Then say back in two or three sentences what you will set up, and start.
 
@@ -204,7 +206,7 @@ do is said plainly, with what the person can do about it.
 
 1. **Read everything.** The five files of section 1, whole, and every kit method you name to the person, whole, before
    you name it (never from its first lines or its description); list them, each with one thing you took from it.
-2. **Asked first.** The seven questions of section 3, and their answers written down in your reply.
+2. **Asked first.** The eight questions of section 3, and their answers written down in your reply.
 3. **Memory folder.** `init` ran; `index/` built; meaning recall ON, or OFF with the reason said.
 4. **Recall wired.** A test prompt in a new session shows a recall block (`BRAIN RECALL:`), in each assistant set up.
 5. **One memory.** The assistant's own memory is off (4.3).
@@ -255,7 +257,7 @@ If, while working for your person, you fix a bug in the engine, measure a recall
 how-to method that would help anyone (not one about your person), propose it upstream.
 
 1. **Ask your person first.** A pull request publishes their work under their GitHub account, and they must accept
-   the CLA (`CLA.md`). Never open one without a clear yes.
+   the CLA (`.github/CLA.md`). Never open one without a clear yes.
 2. **Strip everything personal.** No names, machine names, paths, addresses, credentials or memory content.
 3. **Prove it.** `node tools/verify.mjs`; for a recall change, the before and after on a test set and the command.
 4. **Open the pull request against `staging`**, saying what changed, why, and how you measured it.

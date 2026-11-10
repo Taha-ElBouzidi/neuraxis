@@ -21,7 +21,7 @@ can reach.
 
 - "Remember that ..." : it saves a memory.
 - "What do you know about ...?" : it looks in its memory and tells you, and which files it used.
-- "Forget ..." : it deletes that memory (the file goes to a `deleted/` folder you can empty).
+- "Forget ..." : it deletes that memory, after you give a reason. On a shared brain server the text is kept only as a sealed copy, encrypted to the host machine and stored outside the repository, and `node tools/graveyard.mjs restore <name>` on that machine brings it back. When a memory is replaced on a single machine, the old file moves to a `deleted/` folder inside the brain folder instead.
 - "That is wrong, it is ..." : it replaces the old memory with the right one.
 - "Show me my memory" : it opens the map (`node tools/dashboard.mjs --open`), a picture of everything it knows,
   grouped by topic.

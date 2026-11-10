@@ -15,7 +15,7 @@ gets acted on quickly.
 
 ## What is and is not in scope
 
-In scope: anything that lets a memory, a credential or a hook execute or leak in a way the owner
+In scope: anything that lets a memory, a credential or a hook execute or leak in a way the person
 did not intend; anything that lets one machine on a shared brain read what it was not scoped to.
 
 Out of scope: the contents of your own memories. You wrote them, you control them, and the tool

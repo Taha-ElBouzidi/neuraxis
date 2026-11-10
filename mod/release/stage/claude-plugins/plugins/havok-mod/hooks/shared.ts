@@ -2,7 +2,7 @@ import type { EngineInterface } from 'claude-code';
 import { reserveOf, accountOf, claudeFiles } from './brain/limit-rules.mjs';
 export type Engine = EngineInterface;
 export const PLUGIN = 'havok-mod';
-export const VERSION = '0.1.72';
+export const VERSION = '0.1.75';
 export const toolName = (n: string) => `mcp__${PLUGIN}__${n}`;
 export const toolMatch = (n: string) => ({ tool: new RegExp('^' + toolName(n).replace(/[.*+?^${}()|[\]\\]/g, (c) => '\\' + c) + '$') });
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,47}$/;
@@ -85,6 +85,7 @@ export type Config = {
         healthTimeoutMs: number;
         downAfterMs: number;
         proxyStateFile: string;
+        recallBudgetMs: number;
     };
     remoteControl: {
         enabled: boolean;
@@ -113,8 +114,9 @@ export type Org = {
     owner: string;
     mainAgent: string;
     reviewUrl: string;
+    writingStyle: string;
 };
-const NO_ORG: Org = { home: '', mailLocal: '', mailRemote: '', reportTo: '', layerHost: '', brainDir: '', owner: '', mainAgent: '', reviewUrl: '' };
+const NO_ORG: Org = { home: '', mailLocal: '', mailRemote: '', reportTo: '', layerHost: '', brainDir: '', owner: '', mainAgent: '', reviewUrl: '', writingStyle: '' };
 let ORG: Org = NO_ORG;
 export const org = (): Org => ORG;
 export const owner = () => ORG.owner || 'the owner';
@@ -122,7 +124,7 @@ export const mainAgent = () => ORG.mainAgent || 'the main agent';
 export const homeName = () => ORG.home || 'the brain server';
 export function setOrg(o: Partial<Org> | null) {
     const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
-    ORG = o ? { home: str(o.home), mailLocal: str(o.mailLocal), mailRemote: str(o.mailRemote), reportTo: str(o.reportTo), layerHost: str(o.layerHost), brainDir: str(o.brainDir), owner: str(o.owner), mainAgent: str(o.mainAgent), reviewUrl: str(o.reviewUrl) } : NO_ORG;
+    ORG = o ? { home: str(o.home), mailLocal: str(o.mailLocal), mailRemote: str(o.mailRemote), reportTo: str(o.reportTo), layerHost: str(o.layerHost), brainDir: str(o.brainDir), owner: str(o.owner), mainAgent: str(o.mainAgent), reviewUrl: str(o.reviewUrl), writingStyle: str(o.writingStyle) } : NO_ORG;
 }
 async function loadOrg($: Engine) {
     try {
@@ -189,7 +191,7 @@ export function defaults(home: string, machine: string, cwd: string, configDir =
             fork: true,
         },
         usage: { enabled: true, dir: `${base}/usage` },
-        checks: { brainDir: ORG.brainDir, healthTimeoutMs: 6000, downAfterMs: 30000, proxyStateFile: '' },
+        checks: { brainDir: ORG.brainDir, healthTimeoutMs: 6000, downAfterMs: 30000, proxyStateFile: '', recallBudgetMs: 6000 },
         remoteControl: { enabled: true, name: '', heal: true },
         menu: { enabled: true, name: '', icon: '', color: '' },
         modelEffort: { model: '', effort: '' },
@@ -293,12 +295,14 @@ export async function brainPluginRoot($: Engine, home: string): Promise<string> 
     }
 }
 export async function subscriptionReserve($: Engine, home: string, brainDir: string) {
-    const json = async (f: string): Promise<unknown> => { try {
-        return JSON.parse(await $.fs.read(f));
-    }
-    catch {
-        return null;
-    } };
+    const json = async (f: string): Promise<unknown> => {
+        try {
+            return JSON.parse(await $.fs.read(f));
+        }
+        catch {
+            return null;
+        }
+    };
     const dir = brainDir || (await brainMarker($, home)) || (await brainPluginRoot($, home));
     const { claudeJson } = claudeFiles(home, String((await $.env.get('CLAUDE_CONFIG_DIR')) ?? ''));
     return reserveOf(dir ? await json(`${dir}/brain.json`) : null, accountOf(await json(claudeJson)));

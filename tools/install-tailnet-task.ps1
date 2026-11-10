@@ -1,8 +1,3 @@
-# Registers the task HavokTailnetUp: on Windows' "network connected" event (Microsoft-Windows-NetworkProfile/Operational,
-# event 10000, logged with the name Tailscale when the tailnet comes up) it runs tools/tailnet-sweep.mjs, which tells
-# the local brain server to bind any new tailnet address. Replaces the brain server's 15-second timer (2026-11-05,
-# the owner's timers-to-events review, item 3). Hidden: the action runs through conhost --headless.
-#   powershell -NoProfile -ExecutionPolicy Bypass -File install-tailnet-task.ps1
 $ErrorActionPreference = 'Stop'
 $node = (Get-Command node.exe).Source
 $script = Join-Path $PSScriptRoot 'tailnet-sweep.mjs'
@@ -31,6 +26,5 @@ $xml = @"
 </Task>
 "@
 Register-ScheduledTask -TaskName $name -Xml $xml -Force | Out-Null
-# The marker the brain server reads at start: with the event task in place it runs no 15-second timer.
 Set-Content -Path (Join-Path (Split-Path $PSScriptRoot -Parent) '.tailnet-event') -Value "task $name registered $((Get-Date).ToUniversalTime().ToString('s'))Z" -Encoding ascii
 Write-Output "registered $name; the brain server runs no tailnet timer from its next start"

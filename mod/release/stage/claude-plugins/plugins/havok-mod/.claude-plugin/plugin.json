@@ -1,5 +1,5 @@
 {
   "name": "havok-mod",
-  "version": "0.1.72",
+  "version": "0.1.75",
   "description": "The single Neuraxis mod: context map, archive and restore with layers, agent messages with long poll, keep-warm, usage per turn, and the brain checks on tool calls."
 }

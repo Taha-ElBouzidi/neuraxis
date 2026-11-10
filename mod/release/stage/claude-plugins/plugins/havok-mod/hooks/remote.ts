@@ -172,8 +172,10 @@ function arm($: Engine, ms: number) {
     timer?.cancel();
     timer = $.clock.after(ms, () => {
         timer = null;
-        void rcCheck($).finally(() => { if (!timer && cfg)
-            arm($, RC_EVERY_MS); });
+        void rcCheck($).finally(() => {
+            if (!timer && cfg)
+                arm($, RC_EVERY_MS);
+        });
     });
 }
 export function rcCredentialsPath(): string { return home ? `${home}/.claude/.credentials.json` : ''; }

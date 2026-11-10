@@ -83,18 +83,22 @@ export async function resolveHost($: Engine, o: {
 let direct: 'unknown' | 'yes' | 'no' = 'unknown';
 export function directState() { return direct; }
 export function directReset() { direct = 'unknown'; }
-async function extraCa($: Engine): Promise<string> { try {
-    return String((await $.env.get('NODE_EXTRA_CA_CERTS')) ?? '').trim();
+async function extraCa($: Engine): Promise<string> {
+    try {
+        return String((await $.env.get('NODE_EXTRA_CA_CERTS')) ?? '').trim();
+    }
+    catch {
+        return '';
+    }
 }
-catch {
-    return '';
-} }
-async function envToken($: Engine): Promise<string> { try {
-    return String((await $.env.get('HAVOK_SERVER_TOKEN')) ?? '').trim();
+async function envToken($: Engine): Promise<string> {
+    try {
+        return String((await $.env.get('HAVOK_SERVER_TOKEN')) ?? '').trim();
+    }
+    catch {
+        return '';
+    }
 }
-catch {
-    return '';
-} }
 const CERT_REFUSED = /UNABLE_TO_VERIFY|SELF_SIGNED|CERT_|certificate/i;
 async function directRequest($: Engine, host: Host, method: string, path: string, o: {
     body?: unknown;

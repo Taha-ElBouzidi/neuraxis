@@ -4,7 +4,7 @@ Replace each line below with the real text, keep the headings in this order, and
 
 ## The group
 - Say what the group is for, and list its agents and machines, one per line, with a line saying to add each new one.
-- Say who owns this context and how a member proposes a change: <how members reach the owner>.
+- Say who owns this context and how a member proposes a change: <how members reach the context owner>.
 
 ## What the group shares
 - Say what every member needs that the global and machine contexts do not give, such as the shared project, its vocabulary and the tools it uses.

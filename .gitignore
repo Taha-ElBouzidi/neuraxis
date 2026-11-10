@@ -28,7 +28,7 @@ vault-recipients.json
 *token.json
 *.key
 *key*.pem
-havok-server-token
+*server-token*
 
 # Dependencies
 node_modules/

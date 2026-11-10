@@ -15,7 +15,7 @@ Each entry uses the format below. Add new entries at the bottom.
 **Decision:** The source of truth is a directory of plain markdown files with frontmatter. Every
 index is derived from them and can be rebuilt at any time.
 
-**Why:** The owner must be able to read, diff, grep and edit their own memory with no tool in the
+**Why:** The maintainer must be able to read, diff, grep and edit their own memory with no tool in the
 way. A database hides the contents behind a schema and a client, and makes "what does my agent
 believe" a query instead of a glance.
 
@@ -95,11 +95,11 @@ cannot yet carry.
 
 **Status:** Active
 
-**Decision:** The licence is AGPL-3.0. Every contribution requires a signed CLA granting the owner
-the right to relicense. Commercial licences are offered by the owner.
+**Decision:** The licence is AGPL-3.0. Every contribution requires a signed CLA granting the maintainer
+the right to relicense. Commercial licences are offered by the maintainer.
 
-**Why:** Open source with contributions, and the owner still able to sell it, is only possible if
-the owner holds relicensing rights to every line. Without the CLA that right is lost with the first
+**Why:** Open source with contributions, and the maintainer still able to sell it, is only possible if
+the maintainer holds relicensing rights to every line. Without the CLA that right is lost with the first
 outside pull request, permanently.
 
 **Rejected:** MIT or Apache, which let anyone fork, close and resell. A DCO alone, which does not

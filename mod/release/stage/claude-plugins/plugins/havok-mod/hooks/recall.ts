@@ -9,6 +9,7 @@ import { type Release, parseRelease } from './update';
 import { recordProof } from './hostproof';
 import { sendSystemNote } from './mail';
 export const RECALL_BUDGET_MS = 6000;
+export const recallBudget = () => { const v = Number(S.cfg?.checks?.recallBudgetMs); return Number.isFinite(v) && v >= 3000 ? Math.min(v, 30000) : RECALL_BUDGET_MS; };
 const REPORT_FILE = 'havok-recall-down-reported.json';
 const REPORT_AGAIN_MS = 30 * 60000;
 export const REPORT_TO = () => org().reportTo;
@@ -18,7 +19,7 @@ const DESCRIPTION_CHARS = 60;
 const PROMPT_CHARS = 20000;
 const DOWN_MARK = 'havok-remote-embed-down';
 const RM_JS = "require('fs').rmSync(process.argv[1],{force:true})";
-export const SKIPPED_SLOW = 'recall skipped: the brain server did not answer in 6 s';
+export const skippedSlow = () => `recall skipped: the brain server did not answer in ${Math.round(recallBudget() / 1000)} s`;
 export const downLine = () => `recall is off: the brain server did not answer twice in a row; ${mainAgent()} was told, and recall resumes on its first healthy answer`;
 export const STILL_DOWN_LINE = 'recall is off: the brain server is still not answering; it resumes on its first healthy answer';
 type Memory = {
@@ -293,7 +294,7 @@ export async function recallTurn($: Engine, prompt: string, hook?: HookLink): Pr
         groups: S.cfg?.groups ?? [],
     };
     previous = [...previous, text.slice(0, PROMPT_CHARS)].slice(-PREVIOUS);
-    const r = await hostRequest($, h, 'POST', '/recall/turn', { body, budgetMs: RECALL_BUDGET_MS });
+    const r = await hostRequest($, h, 'POST', '/recall/turn', { body, budgetMs: recallBudget() });
     const latencyMs = (await $.clock.now()) - now;
     const a = r.ok && r.status === 200 ? parseAnswer(r.text) : null;
     await recordProof($, B.home, 'recall', !!a);
@@ -324,5 +325,5 @@ export async function recallTurn($: Engine, prompt: string, hook?: HookLink): Pr
         await reportDown($, now, why);
         return { block: downLine() };
     }
-    return { block: !r.ok && r.timedOut ? SKIPPED_SLOW : `recall skipped: the brain server did not answer (${why.slice(0, 80)})` };
+    return { block: !r.ok && r.timedOut ? skippedSlow() : `recall skipped: the brain server did not answer (${why.slice(0, 80)})` };
 }

@@ -1,3 +1,22 @@
+export const writingRulesOn = (brainJson) => !!brainJson && brainJson.writingStyle === 'plain';
+export function brainConfigNear(hookDir, readFile, home) {
+    for (const f of [hookDir + '/../brain.json', (() => {
+            try {
+                return String(readFile(home + '/.claude/havok-brain-path', 'utf8')).split(/\r?\n/)[0].trim() + '/brain.json';
+            }
+            catch {
+                return '';
+            }
+        })()]) {
+        if (!f || f === '/brain.json')
+            continue;
+        try {
+            return JSON.parse(readFile(f, 'utf8'));
+        }
+        catch { }
+    }
+    return null;
+}
 export const EM_DASH = new RegExp('\\u2014');
 export const EMOJI_CORE = /[\u{1F000}-\u{1FAFF}\u{1F1E6}-\u{1F1FF}]/u;
 export const SYMBOLS_PROSE = /[\u{2190}-\u{21FF}\u{2300}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{2600}-\u{26FF}]/u;

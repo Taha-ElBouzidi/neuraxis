@@ -1,36 +1,3 @@
-// The live brain server. Serves memories, recall and the vault to any agent, on any machine.
-//
-// The owner, 2026-08-19: the vault passphrase and the embedding runtime "need to be shared always
-// live across all machines", served from this desktop, with the git copy kept as backup. He
-// plans to format this box into a proper server later; this is the version that runs today.
-//
-// WHY THIS EXISTS ALONGSIDE GIT, NOT INSTEAD OF IT
-// git gives every machine a full offline replica, which is the better property and stays. What
-// git cannot do is share the two things deliberately kept OUT of the repo: the vault passphrase
-// and node_modules. Copying the passphrase by hand works once and then rots the moment it is
-// rotated. This serves it live instead, so rotation propagates immediately.
-//
-// SECURITY, because this can be exposed to the internet through a tunnel:
-//   - Bearer token on every route except /health. No token, no answer, no exceptions.
-//   - The token is generated here, stored outside the repo, and never logged.
-//   - Binds to 127.0.0.1 by default. Going public is an explicit --public flag, so nobody
-//     exposes the vault by accident.
-//   - Constant-time token comparison, so a wrong token cannot be found by timing.
-//   - Every secret read is logged with a timestamp and the caller, never the value.
-//   - Rate limited. A vault endpoint is the single most attackable thing here.
-//
-// Routes:
-//   GET  /health                     no auth, liveness only, reveals nothing
-//   GET  /vault/list                 names and dates, never values
-//   GET  /vault/get/:name            one secret value
-//   GET  /vault/passphrase           the passphrase itself, so a new machine can bootstrap
-//   POST /embed        {text}        vector for semantic recall
-//   GET  /memory/:slug               one memory file
-//   GET  /rules                      the always-on rules
-//
-// Run:  node tools/brain-server.mjs            local only
-//       node tools/brain-server.mjs --public   bind 0.0.0.0, for use behind a tunnel
-
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, statSync, readdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -40,8 +7,6 @@ import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { execFileSync, execFile, spawn } from 'node:child_process';
 import { withBrainLock } from './brain-git-lock.mjs';
 import { vaultAccess, mayReplace, ownEntries, memoryAccess } from './vault-access.mjs';
-// The SAME tokenizer the hook uses, imported rather than reimplemented. Two copies of a tokenizer
-// is two sparse rankings that agree until the day someone edits one of them.
 import { makeRecall, SHORT_FOLLOW_UP } from './recall-core.mjs';
 import { watchTailnet } from './tailnet-watch.mjs';
 import { servedLayerFiles } from './layers-dist.mjs';
@@ -49,1510 +14,1220 @@ import { makeAlerts } from './server-alerts.mjs';
 import { layerVersions, readLayer } from './layer-host.mjs';
 import { releaseSummary, releaseManifest, releaseZip, releasePath, VERSION_RE } from './release-host.mjs';
 import { makeRecallTurn, translateSync } from './recall-turn.mjs';
-// The decision log and its review page (The owner, 2026-11-04; in the engine since 0.4.90, tools/decision-review.mjs).
 import { waitingCount as decisionsWaiting, search as searchDecisions, MAX_BODY_CHARS as DECISIONS_MAX_BODY } from './decision-store.mjs';
 import { handleDecisionRoute, acceptRows as acceptDecisionRows, startReviewListener, reviewPort, sendSystemMessage, reviewKeyFile, messagesUrlOf } from './decision-review.mjs';
 import { acceptQuota, readQuota } from './agy-quota-store.mjs';
 import { record as recordProvenance } from './provenance.mjs';
 import { makeGuardedEmbedder } from './embed-guard.mjs';
-
 const BRAIN = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.HAVOK_SERVER_PORT || 8478);
-// The layer host folder sits beside the brain on the host (a LAYERS folder beside it), its own git repo, never inside this one.
 const LAYERS_DIR = process.env.HAVOK_LAYERS_DIR || resolve(BRAIN, '..', 'LAYERS');
-// The release host folder (task 18): the releases HAVOK published with tools/release-publish.mjs, also outside the repo.
 const RELEASES_DIR = process.env.HAVOK_RELEASES_DIR || resolve(BRAIN, '..', 'RELEASES');
 const PUBLIC = process.argv.includes('--public');
-// WHERE THIS PROCESS KEEPS ITS PRIVATE FILES.
-//
-// Normally the user profile. But the brain server is started AT BOOT as SYSTEM so it comes back
-// after a reboot without waiting for the owner to log in, and SYSTEM's profile is
-// C:/Windows/System32/config/systemprofile, where none of these files exist. Without this the
-// server would boot, find no token and no age key, and serve nothing while looking healthy.
-//
-// HAVOK_HOME is inherited by child processes, so brain-server passing it once reaches vault.mjs
-// automatically when it shells out to decrypt a secret.
 const CONFIG_DIR = process.env.HAVOK_HOME || resolve(homedir(), '.claude');
-
 const TOKEN_FILE = resolve(CONFIG_DIR, 'havok-server-token');
 const ACCESS_LOG = join(BRAIN, '.server-access.log');
-
-// TLS-ONLY BY DEFAULT once a certificate exists.
-//
-// Plain HTTP was the whole exposure: every client sent its bearer token across the WiFi in the
-// clear, and that token unlocks the entire vault. Keeping the plaintext port open "just during
-// migration" is how a temporary hole becomes a permanent one, because the machine that has not
-// migrated is exactly the machine nobody is looking at.
-//
-// A machine that cannot reach TLS is NOT left brainless: it keeps its local clone and its keyword
-// index and degrades to keyword-only recall, which is what it had before any of this existed, and
-// it heals completely with one git pull. That is a far smaller cost than an indefinitely burned
-// credential, so plaintext now requires an explicit --allow-plaintext.
 const TLS_KEY = resolve(CONFIG_DIR, 'havok-server-key.pem');
 const TLS_CERT = resolve(CONFIG_DIR, 'havok-server-cert.pem');
 const HAVE_TLS = existsSync(TLS_KEY) && existsSync(TLS_CERT);
-// A server started without --public listens on 127.0.0.1 only, where plain HTTP never leaves the machine: it serves it
-// whether or not a certificate exists (2026-11-09, a machine without AVX: a certificate present dropped the plain loopback port the
-// standalone mod is set to, http://127.0.0.1:8479, and the server had to be started with --allow-plaintext).
 const ALLOW_PLAINTEXT = process.argv.includes('--allow-plaintext') || !HAVE_TLS || !PUBLIC;
-
-// Token, generated once and reused. Printed only on creation, never on startup, so it cannot
-// be scraped from a log or a screen share later.
 let TOKEN;
 if (existsSync(TOKEN_FILE)) {
-  TOKEN = readFileSync(TOKEN_FILE, 'utf8').trim();
-} else {
-  TOKEN = randomBytes(32).toString('base64url');
-  mkdirSync(dirname(TOKEN_FILE), { recursive: true });
-  writeFileSync(TOKEN_FILE, TOKEN, 'utf8');
-  // Written to the token FILE, never printed. The first run logged the token into .server.log,
-  // where it sat in plaintext next to the vault it protects. Printing a credential to stdout
-  // means it lands in whatever captures stdout: a log file, a scrollback buffer, a screen share.
-  process.stdout.write("New server token written to " + TOKEN_FILE + ". Read that file to copy it to your other machines." + String.fromCharCode(10));
+    TOKEN = readFileSync(TOKEN_FILE, 'utf8').trim();
 }
-
-// Constant time, so an attacker cannot recover the token one byte at a time by measuring how
-// long the comparison takes.
-// SCOPED TOKENS. A token now says what it may DO, not merely that it is valid.
-//
-// The problem this fixes, found 2026-08-24: /vault/get authenticated on the SHARED bearer token
-// and never checked WHICH machine was asking, so any machine holding it could read every secret
-// the owner owns. Moving the age keys to the server did not reduce that, it only changed the route: a
-// laptop with the token and a live tailnet session still had the whole vault.
-//
-// It also left no middle setting. 'Can do recall' and 'can read every credential' were the same
-// permission, so a company laptop could not be given recall without being given the vault.
-//
-//   full    everything, including /vault/*. The server's own token.
-//   recall  /recall, /embed, /rules, /index/*, /memory/*. Refused on /vault/* with a 403.
-//
-// Extra tokens live in havok-tokens.json under CONFIG_DIR, server side only, never in git. The
-// original havok-server-token still works and counts as full, so nothing breaks on upgrade.
+else {
+    TOKEN = randomBytes(32).toString('base64url');
+    mkdirSync(dirname(TOKEN_FILE), { recursive: true });
+    writeFileSync(TOKEN_FILE, TOKEN, 'utf8');
+    process.stdout.write("New server token written to " + TOKEN_FILE + ". Read that file to copy it to your other machines." + String.fromCharCode(10));
+}
 const TOKENS_FILE = resolve(CONFIG_DIR, 'havok-tokens.json');
 function loadTokens() {
-  try { return JSON.parse(readFileSync(TOKENS_FILE, 'utf8')); } catch { return {}; }
+    try {
+        return JSON.parse(readFileSync(TOKENS_FILE, 'utf8'));
+    }
+    catch {
+        return {};
+    }
 }
-// READ ON EVERY AUTH, not once at boot. This was `let EXTRA_TOKENS = loadTokens()` and it made
-// `token.mjs revoke` a lie: the name disappeared from the file and the token kept working until the
-// server happened to restart. A revoke that needs a reboot to take effect is not a revoke, and the
-// machine this matters for is the locked-down client machine, which the owner does not own and cannot wipe.
-// Issuing had the same bug from the other side: a new machine's token got 401 until a restart, which
-// reads as "the brain is down".
-// The file is a few hundred bytes and sits in the page cache; measured cost is under 0.1ms against a
-// ~70ms recall, so there is no reason to cache it and risk a stale-copy bug in the auth path.
 const EXTRA_TOKENS_NOW = () => loadTokens();
-
-// Constant time, so a token cannot be recovered one byte at a time by timing. Every candidate is
-// compared and the loop does not break early, so the work done does not leak which one matched.
 function constEq(a, b) {
-  const x = Buffer.from(a);
-  const y = Buffer.from(b);
-  if (x.length !== y.length) return false;
-  try { return timingSafeEqual(x, y); } catch { return false; }
+    const x = Buffer.from(a);
+    const y = Buffer.from(b);
+    if (x.length !== y.length)
+        return false;
+    try {
+        return timingSafeEqual(x, y);
+    }
+    catch {
+        return false;
+    }
 }
-
-// null when unknown, otherwise { name, scope }.
 function authOf(header) {
-  const given = String(header || '').replace(/^Bearer\s+/i, '');
-  if (!given) return null;
-  let found = null;
-  if (constEq(given, TOKEN)) found = { name: 'SERVER', scope: 'full' };
-  for (const [tok, meta] of Object.entries(EXTRA_TOKENS_NOW())) {
-    if (constEq(given, tok)) found = { name: meta.name || 'unnamed', scope: meta.scope || 'recall', store: meta.store === true, ...(meta.memoryWrites ? { memoryWrites: String(meta.memoryWrites) } : {}) };
-  }
-  return found;
+    const given = String(header || '').replace(/^Bearer\s+/i, '');
+    if (!given)
+        return null;
+    let found = null;
+    if (constEq(given, TOKEN))
+        found = { name: 'SERVER', scope: 'full' };
+    for (const [tok, meta] of Object.entries(EXTRA_TOKENS_NOW())) {
+        if (constEq(given, tok))
+            found = { name: meta.name || 'unnamed', scope: meta.scope || 'recall', store: meta.store === true, ...(meta.memoryWrites ? { memoryWrites: String(meta.memoryWrites) } : {}) };
+    }
+    return found;
 }
-
-// Slugs the write path accepts and reindexes normally but never commits. See the write handler.
 const EPHEMERAL_SLUG = /^reference_stress_/;
-
-// Rate limit. A vault endpoint reachable from the internet is the most attackable surface in
-// this whole system, and a slow brute force is exactly what this stops.
 const hits = new Map();
 const UNKNOWN_CALLER_LIMIT = 120;
 const KNOWN_CALLER_LIMIT = 600;
 function rateLimited(key, limit = UNKNOWN_CALLER_LIMIT) {
-  const now = Date.now();
-  const win = hits.get(key) || [];
-  const recent = win.filter((t) => now - t < 60_000);
-  recent.push(now);
-  hits.set(key, recent);
-  return recent.length > limit;
+    const now = Date.now();
+    const win = hits.get(key) || [];
+    const recent = win.filter((t) => now - t < 60000);
+    recent.push(now);
+    hits.set(key, recent);
+    return recent.length > limit;
 }
-
-// THE BACKGROUND SAVE QUEUE for POST /memory. One run at a time, and every write that arrives while a
-// run is going is folded into the next one: five memories written together cost one reindex and one
-// commit, not five. Async execFile, so the server keeps answering recall while git and the indexer
-// work. Push failure is still not a write failure (the memory is live on this disk, git is the
-// backup), and the reason is still audited, because the pre-commit gate refusing a write is
-// information someone needs.
 const saveQueue = new Map();
 let saveRunning = false;
-// WRITES WAIT WHILE A SAVE INDEXES AND COMMITS. On 2026-10-02 a laptop client moved about 180 memories in, one every few
-// seconds; each one landed while the previous batch was being indexed and checked, the commit gate saw an index
-// that no longer matched memory/ and refused, and 115 writes in a row were saved but never committed. Holding new
-// writes for the few seconds of index and commit keeps memory/ still while it is checked. The push is outside it.
 let saveGate = Promise.resolve();
-// HAVOK_BRAIN_SERVER_COMMIT: the brain's pre-commit lets a commit of memory/ through only from here (or the
-// save-brain fallback) where brain.json memoryWritesThroughServer is set (M2, system review 2026-11-09).
 const runAsync = (cmd, args, timeout) => new Promise((resolve, reject) => {
-  execFile(cmd, args, { cwd: BRAIN, timeout, windowsHide: true, maxBuffer: 16 << 20, env: { ...process.env, HAVOK_BRAIN_SERVER_COMMIT: '1' } }, (e, stdout, stderr) => (
-    e ? reject(Object.assign(e, { stdout, stderr })) : resolve(stdout)));
+    execFile(cmd, args, { cwd: BRAIN, timeout, windowsHide: true, maxBuffer: 16 << 20, env: { ...process.env, HAVOK_BRAIN_SERVER_COMMIT: '1' } }, (e, stdout, stderr) => (e ? reject(Object.assign(e, { stdout, stderr })) : resolve(stdout)));
 });
+const QUEUE_FILE = join(BRAIN, '.save-queue.jsonl');
+function persistQueue() {
+    try {
+        if (!saveQueue.size && !inFlight.size) {
+            rmSync(QUEUE_FILE, { force: true });
+            return;
+        }
+        const rows = [...inFlight.entries(), ...saveQueue.entries()].map(([slug, m]) => JSON.stringify({ slug, ...m }));
+        writeFileSync(QUEUE_FILE, rows.join(String.fromCharCode(10)) + String.fromCharCode(10), 'utf8');
+    }
+    catch { }
+}
+const inFlight = new Map();
 function queueBrainSave(slug, existed, callerName, ip) {
-  const prev = saveQueue.get(slug);
-  saveQueue.set(slug, { existed: prev ? prev.existed : existed, callerName, ip });
-  if (!saveRunning) drainBrainSaves();
+    const prev = saveQueue.get(slug) || inFlight.get(slug);
+    saveQueue.set(slug, { existed: prev ? prev.existed : existed, callerName, ip });
+    persistQueue();
+    if (!saveRunning)
+        drainBrainSaves();
+}
+function resumeQueue() {
+    let rows = [];
+    try {
+        rows = readFileSync(QUEUE_FILE, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try {
+            return JSON.parse(l);
+        }
+        catch {
+            return null;
+        } }).filter(Boolean);
+    }
+    catch {
+        return;
+    }
+    const wanted = rows.filter((r) => typeof r.slug === 'string' && /^[a-z0-9_-]+$/i.test(r.slug) && existsSync(join(BRAIN, 'memory', r.slug + '.md')));
+    if (!wanted.length) {
+        try {
+            rmSync(QUEUE_FILE, { force: true });
+        }
+        catch { }
+        return;
+    }
+    audit('MEMORY-QUEUE-RESUMED ' + wanted.map((r) => r.slug).join(', '));
+    for (const r of wanted)
+        queueBrainSave(r.slug, !!r.existed, String(r.callerName || 'resumed'), String(r.ip || '-'));
 }
 async function drainBrainSaves() {
-  saveRunning = true;
-  try {
-    // One turn of the shared brain write lock per batch (tools/brain-git-lock.mjs, 2026-10-31): a save-brain.mjs run or
-    // the vault store committing at the same moment made this commit fail with nothing retried. The lock is taken
-    // BEFORE the gate shuts, so writes from other machines keep landing while this waits; they join this batch.
-    while (saveQueue.size) {
-      await withBrainLock('brain-server: memory queue', saveOneBatch)
-        .catch((e) => audit('SAVE-LOCK ' + String(e.message).slice(0, 200)));
+    saveRunning = true;
+    try {
+        while (saveQueue.size) {
+            await withBrainLock('brain-server: memory queue', saveOneBatch)
+                .catch((e) => audit('SAVE-LOCK ' + String(e.message).slice(0, 200)));
+        }
     }
-  } finally { saveRunning = false; }
+    finally {
+        saveRunning = false;
+    }
 }
-
 async function saveOneBatch() {
-  const batch = [...saveQueue.entries()];
-  saveQueue.clear();
-  let openGate = () => {};
-  saveGate = new Promise((r) => { openGate = r; });
-  try { await runAsync(process.execPath, [join(BRAIN, 'tools', 'build-index.mjs')], 120000); }
-  catch (e) { audit('INDEX-FAIL ' + String(e.message).slice(0, 120)); }
-  // Test probes do not belong in the brain's permanent history (tools/stress-test.mjs writes
-  // five at once). Written and reindexed like any other, never committed.
-  const keep = batch.filter(([s]) => !EPHEMERAL_SLUG.test(s));
-  for (const [s, m] of batch) if (EPHEMERAL_SLUG.test(s)) audit('MEMORY-WRITE ' + m.ip + ' ' + m.callerName + ' ' + s + ' PUSH-FAILED: ephemeral test slug, deliberately not committed');
-  if (!keep.length) { openGate(); return; }
-  let pushError = null;
-  try {
-    // Only this batch's memories (M2): a file another process left in memory/ is never swept into this commit.
-    const mine = keep.map(([s]) => 'memory/' + s + '.md');
-    const paths = [...mine, 'memory/MEMORY.md', 'index/', 'MANIFEST.md', 'provenance/'].filter((p) => p.endsWith('/') ? existsSync(join(BRAIN, p)) : true);
-    await runAsync('git', ['-C', BRAIN, 'add', '-A', '--', ...paths], 30000);
-    // The updated: date before the commit, not in it: git drops what the pre-commit stamps when a commit is limited to
-    // paths, so the date stayed on disk only and each saved memory then read as modified (2026-11-10).
-    await runAsync(process.execPath, [join(BRAIN, 'tools', 'stamp-updated.mjs')], 60000).catch(() => undefined);
-    await runAsync('git', ['-C', BRAIN, 'add', '-A', '--', ...mine.filter((p) => existsSync(join(BRAIN, p)))], 30000).catch(() => undefined);
-    const who = [...new Set(keep.map(([, m]) => m.callerName))].join(', ');
-    const message = keep.length === 1
-      ? (keep[0][1].existed ? 'memory: update ' : 'memory: ') + keep[0][0] + ' (via ' + who + ')'
-      : 'memory: ' + keep.map(([s]) => s).join(', ') + ' (via ' + who + ')';
-    // Only the brain's own paths: this folder is shared with sessions editing code, and a plain commit took their
-    // staged code twice on 2026-10-23 under a memory message.
+    const batch = [...saveQueue.entries()];
+    saveQueue.clear();
+    for (const [sl, m] of batch)
+        inFlight.set(sl, m);
+    let openGate = () => { };
+    saveGate = new Promise((r) => { openGate = r; });
     try {
-      await runAsync('git', ['-C', BRAIN, 'commit', '-m', message, '--', ...paths], 180000);
-      // A commit limited to paths uses its own index; the pre-commit's date stamp then left the real index holding the
-      // unstamped copy, which a later plain commit would have written back. The real index takes HEAD for these paths.
-      await runAsync('git', ['-C', BRAIN, 'reset', '-q', '--', ...paths], 30000).catch(() => undefined);
-    } finally { openGate(); }
-    // A memory file in memory/ that no batch wrote (written by hand) is indexed from the disk but never committed here:
-    // said in the audit log, so it is found.
-    try {
-      const stray = String(await runAsync('git', ['-C', BRAIN, 'status', '--porcelain', '--', 'memory/'], 30000)).split('\n').filter((l) => /\.md$/.test(l) && !/MEMORY\.md$/.test(l)).map((l) => l.slice(3).trim());
-      if (stray.length) audit('MEMORY-STRAY files in memory/ not written through the server: ' + stray.slice(0, 10).join(', '));
-    } catch { /* the audit line is a courtesy */ }
-    try { await runAsync('git', ['-C', BRAIN, 'push', '-q', 'origin', 'HEAD'], 120000); }
-    catch (pe) {
-      // Refused because another machine pushed first: take its commits from Gitea, push once more (2026-11-05: only
-      // the nightly HavokBrainSync task pulled before, so the memory reached the remote up to a day late).
-      if (!/non-fast-forward|fetch first|rejected/i.test(String((pe && (pe.stderr || pe.message)) || ''))) throw pe;
-      await runAsync('git', ['-C', BRAIN, 'pull', '-q', '--no-rebase', '--no-edit', 'gitea', 'master'], 180000);
-      await runAsync('git', ['-C', BRAIN, 'push', '-q', 'origin', 'HEAD'], 120000);
+        await runAsync(process.execPath, [join(BRAIN, 'tools', 'build-index.mjs')], 120000);
     }
-  } catch (ge) {
-    const msg = String((ge && (ge.stderr || ge.stdout || ge.message)) || '');
-    pushError = /VERIFY FAILED/i.test(msg) ? 'the pre-commit gate refused it: run node tools/verify.mjs'
-      : /nothing to commit/i.test(msg) ? 'nothing to commit (content identical)'
-        : msg.replace(/\s+/g, ' ').slice(0, 160) || 'git failed with no output';
-  }
-  openGate(); // also when git add or the commit threw: a gate left shut would hang every later write
-  for (const [s, m] of keep) audit('MEMORY-WRITE ' + m.ip + ' ' + m.callerName + ' ' + s + (m.existed ? ' update' : ' new') + (pushError ? ' PUSH-FAILED: ' + pushError : ''));
-  // A contact memory changed: the WhatsApp address book (index/contacts.json) is rebuilt from it, detached, after this
-  // batch's own commit (2026-11-05: the hourly HavokWaContacts task is gone). Never from the commit gate: chained there,
-  // each rebuild's commit ran the gate again (seven commits in three minutes, 2026-11-05 17:53).
-  if (keep.some(([s]) => s.startsWith('contact_')) && existsSync(join(BRAIN, 'tools', 'contacts.mjs'))) {
-    try { spawn(process.execPath, [join(BRAIN, 'tools', 'contacts.mjs')], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch { /* the bridge's new-number run catches up */ }
-  }
+    catch (e) {
+        audit('INDEX-FAIL ' + String(e.message).slice(0, 120));
+    }
+    const keep = batch.filter(([s]) => !EPHEMERAL_SLUG.test(s));
+    for (const [s, m] of batch)
+        if (EPHEMERAL_SLUG.test(s))
+            audit('MEMORY-WRITE ' + m.ip + ' ' + m.callerName + ' ' + s + ' PUSH-FAILED: ephemeral test slug, deliberately not committed');
+    if (!keep.length) {
+        openGate();
+        for (const [sl] of batch)
+            inFlight.delete(sl);
+        persistQueue();
+        return;
+    }
+    let pushError = null;
+    try {
+        const mine = keep.map(([s]) => 'memory/' + s + '.md');
+        const paths = [...mine, 'memory/MEMORY.md', 'index/', 'MANIFEST.md', 'provenance/'].filter((p) => p.endsWith('/') ? existsSync(join(BRAIN, p)) : true);
+        await runAsync('git', ['-C', BRAIN, 'add', '-A', '--', ...paths], 30000);
+        await runAsync(process.execPath, [join(BRAIN, 'tools', 'stamp-updated.mjs')], 60000).catch(() => undefined);
+        await runAsync('git', ['-C', BRAIN, 'add', '-A', '--', ...mine.filter((p) => existsSync(join(BRAIN, p)))], 30000).catch(() => undefined);
+        const who = [...new Set(keep.map(([, m]) => m.callerName))].join(', ');
+        const message = keep.length === 1
+            ? (keep[0][1].existed ? 'memory: update ' : 'memory: ') + keep[0][0] + ' (via ' + who + ')'
+            : 'memory: ' + keep.map(([s]) => s).join(', ') + ' (via ' + who + ')';
+        try {
+            await runAsync('git', ['-C', BRAIN, 'commit', '-m', message, '--', ...paths], 180000);
+            await runAsync('git', ['-C', BRAIN, 'reset', '-q', '--', ...paths], 30000).catch(() => undefined);
+        }
+        finally {
+            openGate();
+        }
+        try {
+            const stray = String(await runAsync('git', ['-C', BRAIN, 'status', '--porcelain', '--', 'memory/'], 30000)).split('\n').filter((l) => /\.md$/.test(l) && !/MEMORY\.md$/.test(l)).map((l) => l.slice(3).trim());
+            if (stray.length)
+                audit('MEMORY-STRAY files in memory/ not written through the server: ' + stray.slice(0, 10).join(', '));
+        }
+        catch { }
+        try {
+            await runAsync('git', ['-C', BRAIN, 'push', '-q', 'origin', 'HEAD'], 120000);
+        }
+        catch (pe) {
+            if (!/non-fast-forward|fetch first|rejected/i.test(String((pe && (pe.stderr || pe.message)) || '')))
+                throw pe;
+            await runAsync('git', ['-C', BRAIN, 'pull', '-q', '--no-rebase', '--no-edit', 'gitea', 'master'], 180000);
+            await runAsync('git', ['-C', BRAIN, 'push', '-q', 'origin', 'HEAD'], 120000);
+        }
+    }
+    catch (ge) {
+        const msg = String((ge && (ge.stderr || ge.stdout || ge.message)) || '');
+        pushError = /VERIFY FAILED/i.test(msg) ? 'the pre-commit gate refused it: run node tools/verify.mjs'
+            : /nothing to commit/i.test(msg) ? 'nothing to commit (content identical)'
+                : msg.replace(/\s+/g, ' ').slice(0, 160) || 'git failed with no output';
+    }
+    openGate();
+    for (const [s, m] of keep)
+        audit('MEMORY-WRITE ' + m.ip + ' ' + m.callerName + ' ' + s + (m.existed ? ' update' : ' new') + (pushError ? ' PUSH-FAILED: ' + pushError : ''));
+    for (const [sl] of batch)
+        inFlight.delete(sl);
+    persistQueue();
+    if (keep.some(([s]) => s.startsWith('contact_')) && existsSync(join(BRAIN, 'tools', 'contacts.mjs'))) {
+        try {
+            spawn(process.execPath, [join(BRAIN, 'tools', 'contacts.mjs')], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+        }
+        catch { }
+    }
 }
-
 function audit(line) {
-  // Control characters out: a decoded %0A in an unauthenticated /bootstrap/ name wrote a forged line (audit 2026-11-01).
-  try { appendFileSync(ACCESS_LOG, new Date().toISOString() + ' ' + String(line).replace(/[\u0000-\u001f\u007f]+/g, ' ') + '\n'); } catch { /* logging must not break serving */ }
+    try {
+        appendFileSync(ACCESS_LOG, new Date().toISOString() + ' ' + String(line).replace(/[\u0000-\u001f\u007f]+/g, ' ') + '\n');
+    }
+    catch { }
 }
-
-// One cheap number that changes whenever anything a machine caches changes.
-//
-// Hashing 500KB on every request would be silly, so it is recomputed only when a file's size or
-// mtime moves. That is enough: the index files are written by build-index.mjs, never edited in
-// place by hand, so an mtime change is a real change.
-//
-// Deliberately NOT the git commit hash. A machine can be at the right commit and still have a
-// stale generated index, because index/ is derived from memory/ and regenerating it is a separate
-// step. The content is what matters, so the content is what is hashed.
 const INDEX_FILES = ['keywords.json', 'embeddings.json', 'rules.json', 'contact.md', 'feedback.md', 'project.md', 'reference.md', 'user.md', 'translate-system.txt'];
 let versionCache = null;
 function indexVersion() {
-  // Hash CONTENT, not size and mtime.
-  //
-  // The first version of this hashed size+mtime, which was wrong in a way that would have broken
-  // the whole point: mtime is machine-local, so a client could never compute the same value for
-  // identical content and therefore could never tell whether its own copy was current. The
-  // comparison has to be possible on both ends or there is no way to detect divergence.
-  //
-  // mtime still earns its keep as a CACHE KEY: hashing 500KB costs a few milliseconds, so it is
-  // done only when a file actually changes on disk. The published number is pure content.
-  const stat = [];
-  for (const name of INDEX_FILES) {
-    const f = join(BRAIN, 'index', name);
-    try { const st = statSync(f); stat.push(name + ':' + st.size + ':' + Math.floor(st.mtimeMs)); } catch { /* absent */ }
-  }
-  const key = stat.join('|');
-  if (versionCache && versionCache.key === key) return versionCache.payload;
-
-  const files = {};
-  const whole = createHash('sha256');
-  for (const name of INDEX_FILES) {
-    const f = join(BRAIN, 'index', name);
-    let buf = null;
-    try { buf = readFileSync(f); } catch { continue; }
-    const sha = createHash('sha256').update(buf).digest('hex').slice(0, 16);
-    files[name] = { bytes: buf.length, sha };
-    whole.update(name + ':' + sha + '|');
-  }
-  const payload = {
-    version: whole.digest('hex').slice(0, 16),
-    files,
-    memories: (() => {
-      try { return readdirSync(join(BRAIN, 'memory')).filter((f) => f.endsWith('.md')).length; } catch { return 0; }
-    })(),
-  };
-  versionCache = { key, payload };
-  return payload;
+    const stat = [];
+    for (const name of INDEX_FILES) {
+        const f = join(BRAIN, 'index', name);
+        try {
+            const st = statSync(f);
+            stat.push(name + ':' + st.size + ':' + Math.floor(st.mtimeMs));
+        }
+        catch { }
+    }
+    const key = stat.join('|');
+    if (versionCache && versionCache.key === key)
+        return versionCache.payload;
+    const files = {};
+    const whole = createHash('sha256');
+    for (const name of INDEX_FILES) {
+        const f = join(BRAIN, 'index', name);
+        let buf = null;
+        try {
+            buf = readFileSync(f);
+        }
+        catch {
+            continue;
+        }
+        const sha = createHash('sha256').update(buf).digest('hex').slice(0, 16);
+        files[name] = { bytes: buf.length, sha };
+        whole.update(name + ':' + sha + '|');
+    }
+    const payload = {
+        version: whole.digest('hex').slice(0, 16),
+        files,
+        memories: (() => {
+            try {
+                return readdirSync(join(BRAIN, 'memory')).filter((f) => f.endsWith('.md')).length;
+            }
+            catch {
+                return 0;
+            }
+        })(),
+    };
+    versionCache = { key, payload };
+    return payload;
 }
-
 const json = (res, code, body) => {
-  res.writeHead(code, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body));
+    res.writeHead(code, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(body));
 };
-
-// The embed model is loaded lazily and once. Loading it at startup would make the server take
-// 70 seconds to answer /health, and most requests never touch it.
-//
-// ON ITS OWN THREAD, WITH A LIMIT ON EVERY CALL (2026-11-02). The model used to run here, on the thread that answers
-// every request: onnxruntime-node runs it synchronously, so when SERVER's CPU was saturated one embedding took 8.9 s
-// and recall stopped answering for every agent, /health included, until a restart by hand. Now a call that gives no
-// answer within EMBED_TIMEOUT_MS fails, recall falls back to keyword only and says so (tools/embed-guard.mjs).
-// 4 s: a warm call is 28 to 58 ms and a paged-out one 684 ms (measured 2026-08-22), and the hook gives /recall 9 s.
 const EMBED_TIMEOUT_MS = Number(process.env.HAVOK_EMBED_TIMEOUT_MS || 4000);
-// The first load has been measured at about 70 s; past twice that the worker is ended and the next call tries again.
 const EMBED_LOAD_TIMEOUT_MS = Number(process.env.HAVOK_EMBED_LOAD_TIMEOUT_MS || 180000);
 let embedder = null;
 async function getEmbedder() {
-  if (!embedder) {
-    embedder = makeGuardedEmbedder({
-      model: 'Xenova/all-MiniLM-L6-v2', module: process.env.HAVOK_EMBED_MODULE || null,
-      timeoutMs: EMBED_TIMEOUT_MS, loadTimeoutMs: EMBED_LOAD_TIMEOUT_MS,
-      // The model is tried once in a child process before it runs beside the server (a CPU without AVX crashes it).
-      probe: process.env.HAVOK_EMBED_PROBE !== 'off', stateFile: join(BRAIN, '.embed-probe.json'),
-      onEvent: (what) => {
-        if (/^probe-/.test(what)) { audit('EMBED-' + what.toUpperCase()); return; }
-        const limit = what === 'load-timeout' ? EMBED_LOAD_TIMEOUT_MS : EMBED_TIMEOUT_MS;
-        audit('EMBED-' + what.toUpperCase() + ' limit ' + limit + 'ms');
-        try { if (/timeout/.test(what)) serverAlerts.embed(what, limit); } catch { /* never fails the embed path */ }
-      },
-    });
-  }
-  return embedder.embed;
+    if (!embedder) {
+        embedder = makeGuardedEmbedder({
+            model: 'Xenova/all-MiniLM-L6-v2', module: process.env.HAVOK_EMBED_MODULE || null,
+            timeoutMs: EMBED_TIMEOUT_MS, loadTimeoutMs: EMBED_LOAD_TIMEOUT_MS,
+            probe: process.env.HAVOK_EMBED_PROBE !== 'off', stateFile: join(BRAIN, '.embed-probe.json'),
+            onEvent: (what) => {
+                if (/^probe-/.test(what)) {
+                    audit('EMBED-' + what.toUpperCase());
+                    return;
+                }
+                const limit = what === 'load-timeout' ? EMBED_LOAD_TIMEOUT_MS : EMBED_TIMEOUT_MS;
+                audit('EMBED-' + what.toUpperCase() + ' limit ' + limit + 'ms');
+                try {
+                    if (/timeout/.test(what))
+                        serverAlerts.embed(what, limit);
+                }
+                catch { }
+            },
+        });
+    }
+    return embedder.embed;
 }
-
-// ---- SERVER-SIDE RECALL -----------------------------------------------------------------
-//
-// The owner, 2026-08-22: "the brain is on the server twenty four seven, and every other agent has to
-// access the brain, and they go through the server."
-//
-// Matching moved here from the machines. Measured BEFORE moving it, so this is a result and not
-// a hope: matching all 129 memories costs 0.164ms, and returning the ANSWER (1.0KB of names and
-// descriptions) is EIGHT TIMES SMALLER than returning the raw vector a machine needed in order to
-// match for itself (8.0KB). Faster and lighter than what it replaces.
-//
-// The real reason is not speed. If no machine holds an index, no machine's index can be stale or
-// half built. The six-memories-with-no-vector bug found this morning becomes structurally
-// impossible rather than something an agent has to remember to prevent.
-//
-// PRIVACY CHANGE, stated plainly because it reverses a property the brain used to advertise: the
-// server now DOES learn which memories matched, because it is the thing doing the matching. It
-// previously could not. The audit line below therefore records counts only, never the prompt text
-// and never the memory names.
-// The recall itself lives in tools/recall-core.mjs, shared with a local install (2026-09-26).
 const KEYWORD_ONLY_NOTE = 'NOTE: semantic recall missed this turn, so the recall below is keyword only and a paraphrase may not match. Why: the brain server ';
 const recall = makeRecall({ brain: BRAIN, getEmbedder, indexVersion });
-// Turn recall for the mod (context release, 2026-11-02): the hook's query building and its per-session state, here.
 const recallTurn = makeRecallTurn({ brain: BRAIN, recall, layersDir: LAYERS_DIR, releasesDir: RELEASES_DIR, stateDir: join(BRAIN, '.recall-turn-state'), translate: (text) => translateSync(text, BRAIN), shortFollowUp: SHORT_FOLLOW_UP });
-
 const handler = async (req, res) => {
-  const ip = req.socket.remoteAddress || '?';
-  // Decoded as a stream: chunk by chunk, a letter split across two packets became two broken characters (audit
-  // 2026-11-01, tools/brain-server-requests.test.mjs).
-  // Not for the archive upload, whose body is gzip bytes (tools/archive-upload.mjs).
-  if (!String(req.url || '').startsWith('/archive/upload')) req.setEncoding('utf8');
-  const url = new URL(req.url, 'http://x');
-  const path = url.pathname;
-
-  // Liveness is deliberately unauthenticated and deliberately empty: a tunnel health check
-  // needs it, and it must reveal nothing about what is behind the door.
-  if (path === '/health') return json(res, 200, { ok: true });
-
-  // TAILNET SWEEP (2026-11-05, item 3): the task HavokTailnetUp calls this on Windows' "network connected" event, in
-  // place of reading the interface list every 15 s. Loopback only and no token: it reveals nothing and only makes the
-  // server bind a tailnet address it does not serve yet.
-  if (path === '/tailnet/sweep' && req.method === 'POST') {
-    if (!/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(ip)) return json(res, 403, { error: 'loopback only' });
-    const bound = tailnetSweep ? tailnetSweep.sweep() : [];
-    return json(res, 200, { ok: true, bound, known: tailnetSweep ? tailnetSweep.known() : [], addresses: tailnetAddresses() });
-  }
-
-  // ONE-SHOT TOKEN BOOTSTRAP, bound to a tailnet address.
-  //
-  // The chicken and egg: a new machine needs a token to talk to the server, and the only safe way
-  // to hand it one is over a channel that is already authenticated. Taildrop was meant to be that
-  // channel and failed on the the client company link 2026-08-24: six empty 'tailscale file get' calls,
-  // 'server is not replying', reachable only via a Paris DERP relay with no direct path, and
-  // tailscaled unable to reach the coordination server. Its HTTPS requests arrived here perfectly
-  // throughout, which is the whole point: the data path worked while the file path did not.
-  //
-  // WHY THE SOURCE IP IS A REAL IDENTITY HERE, which it would never be on a normal network:
-  // a 100.64.0.0/10 address on a tailnet is cryptographically bound to a WireGuard node key. It
-  // cannot be spoofed by anything that is not already in the tailnet, and the server only listens
-  // on loopback and its own tailnet address, so nothing off the tailnet can even open the socket.
-  //
-  // STILL DELIBERATELY NARROW, because this route hands out a credential without a credential:
-  //   armed by hand, per machine, with the exact IP   (node tools/token.mjs arm NAME --ip X)
-  //   ONE SHOT, the arm is consumed on first success
-  //   only ever returns a token that already exists for that name
-  //   every attempt is logged, hit or miss
-  if (path.startsWith('/bootstrap/')) {
-    const want = decodeURIComponent(path.slice('/bootstrap/'.length));
-    const from = String(ip).replace(/^::ffff:/, '');
-    let armed = {};
-    try { armed = JSON.parse(readFileSync(resolve(CONFIG_DIR, 'havok-bootstrap.json'), 'utf8')); } catch { /* nothing armed */ }
-    const entry = armed[want];
-    if (!entry || entry.ip !== from) {
-      audit('BOOTSTRAP-REFUSED ' + from + ' wanted=' + want + (entry ? ' armed-for=' + entry.ip : ' not-armed'));
-      return json(res, 403, { error: 'not armed', detail: 'ask the owner to arm this machine: node tools/token.mjs arm <NAME> --ip <your tailnet ip>' });
+    const ip = req.socket.remoteAddress || '?';
+    if (!String(req.url || '').startsWith('/archive/upload'))
+        req.setEncoding('utf8');
+    const url = new URL(req.url, 'http://x');
+    const path = url.pathname;
+    if (path === '/health')
+        return json(res, 200, { ok: true });
+    if (path === '/tailnet/sweep' && req.method === 'POST') {
+        if (!/^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(ip))
+            return json(res, 403, { error: 'loopback only' });
+        const bound = tailnetSweep ? tailnetSweep.sweep() : [];
+        return json(res, 200, { ok: true, bound, known: tailnetSweep ? tailnetSweep.known() : [], addresses: tailnetAddresses() });
     }
-    // Same reason as authOf: reading the boot-time snapshot here meant issue, then arm, then collect
-    // returned "no token issued" for a token plainly present on disk, until a restart.
-    const hit = Object.entries(EXTRA_TOKENS_NOW()).find(([, m]) => m.name === want);
-    if (!hit) {
-      audit('BOOTSTRAP-NOTOKEN ' + from + ' ' + want);
-      return json(res, 404, { error: 'no token issued for ' + want });
+    if (path.startsWith('/bootstrap/')) {
+        const want = decodeURIComponent(path.slice('/bootstrap/'.length));
+        const from = String(ip).replace(/^::ffff:/, '');
+        let armed = {};
+        try {
+            armed = JSON.parse(readFileSync(resolve(CONFIG_DIR, 'havok-bootstrap.json'), 'utf8'));
+        }
+        catch { }
+        const entry = armed[want];
+        if (!entry || entry.ip !== from) {
+            audit('BOOTSTRAP-REFUSED ' + from + ' wanted=' + want + (entry ? ' armed-for=' + entry.ip : ' not-armed'));
+            return json(res, 403, { error: 'not armed', detail: 'ask the person to arm this machine: node tools/token.mjs arm <NAME> --ip <your tailnet ip>' });
+        }
+        const hit = Object.entries(EXTRA_TOKENS_NOW()).find(([, m]) => m.name === want);
+        if (!hit) {
+            audit('BOOTSTRAP-NOTOKEN ' + from + ' ' + want);
+            return json(res, 404, { error: 'no token issued for ' + want });
+        }
+        try {
+            delete armed[want];
+            writeFileSync(resolve(CONFIG_DIR, 'havok-bootstrap.json'), JSON.stringify(armed, null, 2), 'utf8');
+        }
+        catch (e) {
+            audit('BOOTSTRAP-ARMFAIL ' + from + ' ' + want);
+            return json(res, 500, { error: 'could not consume the arm, refusing to hand out a token' });
+        }
+        audit('BOOTSTRAP-OK ' + from + ' ' + want + ' scope=' + hit[1].scope);
+        return json(res, 200, { name: want, scope: hit[1].scope, token: hit[0] });
     }
-    // Consume the arm BEFORE replying. If the write fails we would rather refuse a legitimate
-    // retry than leave the route open, so this is deliberately not best-effort.
-    try {
-      delete armed[want];
-      writeFileSync(resolve(CONFIG_DIR, 'havok-bootstrap.json'), JSON.stringify(armed, null, 2), 'utf8');
-    } catch (e) {
-      audit('BOOTSTRAP-ARMFAIL ' + from + ' ' + want);
-      return json(res, 500, { error: 'could not consume the arm, refusing to hand out a token' });
+    const known = authOf(req.headers.authorization);
+    if (known ? rateLimited('token:' + known.name, KNOWN_CALLER_LIMIT) : rateLimited(ip)) {
+        audit('RATE-LIMITED ' + ip + (known ? ' ' + known.name : ''));
+        return json(res, 429, { error: 'too many requests' });
     }
-    audit('BOOTSTRAP-OK ' + from + ' ' + want + ' scope=' + hit[1].scope);
-    return json(res, 200, { name: want, scope: hit[1].scope, token: hit[0] });
-  }
-
-  // Known machines get their own budget, per token name, so several sessions behind one address (a laptop client
-  // runs two plus its mirror) cannot starve each other; found 2026-09-26 when 4 of 10 prompts there came
-  // back rate limited and fell to keyword-only recall. Unknown callers keep the tight per-address limit,
-  // which is what stops a slow brute force against the vault.
-  const known = authOf(req.headers.authorization);
-  if (known ? rateLimited('token:' + known.name, KNOWN_CALLER_LIMIT) : rateLimited(ip)) {
-    audit('RATE-LIMITED ' + ip + (known ? ' ' + known.name : ''));
-    return json(res, 429, { error: 'too many requests' });
-  }
     const caller = known;
     if (!caller) {
-      audit('DENIED ' + ip + ' ' + path);
-      return json(res, 401, { error: 'unauthorized' });
+        audit('DENIED ' + ip + ' ' + path);
+        return json(res, 401, { error: 'unauthorized' });
     }
-    // A recall token on a vault route is 403, not 401. The credential is real, it simply is not
-    // allowed here, and saying so plainly stops an agent burning ten minutes deciding its token
-    // expired. Logged with the token NAME so it is obvious which machine reached for the vault.
-    // A recall token with "store": true may add secrets and list its own (tools/vault-access.mjs, 2026-10-31).
     const vAccess = vaultAccess(caller, req.method, path);
     if (vAccess === 'deny') {
-      audit('REFUSED-SCOPE ' + ip + ' ' + caller.name + ' scope=' + caller.scope + (caller.store ? '+store' : '') + ' ' + path);
-      return json(res, 403, { error: 'forbidden',
-        detail: 'this token has scope "' + caller.scope + '"' + (caller.store ? ' with store: it can add a new secret and list the ones it added, never read one' : ' and cannot read the vault') + '. Ask the owner of the brain, do not retry.' });
+        audit('REFUSED-SCOPE ' + ip + ' ' + caller.name + ' scope=' + caller.scope + (caller.store ? '+store' : '') + ' ' + path);
+        return json(res, 403, { error: 'forbidden',
+            detail: 'this token has scope "' + caller.scope + '"' + (caller.store ? ' with store: it can add a new secret and list the ones it added, never read one' : ' and cannot read the vault') + '. Ask the person of the brain, do not retry.' });
     }
-
-  try {
-    if (path === '/vault/list') {
-      const v = JSON.parse(readFileSync(join(BRAIN, 'vault.json'), 'utf8'));
-      let out = Object.entries(v.secrets || {}).map(([name, s]) => ({ name, updated: s.updated, note: s.note || '' }));
-      if (vAccess === 'own-list') out = ownEntries(out, caller.name);
-      audit('list ' + ip + (vAccess === 'own-list' ? ' ' + caller.name + ' own only' : ''));
-      return json(res, 200, { secrets: out });
-    }
-
-    if (path.startsWith('/vault/get/')) {
-      // basename() so a crafted name cannot escape into another file.
-      const name = basename(decodeURIComponent(path.slice('/vault/get/'.length)));
-      // A secret that does not exist is a 404, not a 500.
-      //
-      // vault.mjs exits non-zero for an unknown name, execFileSync throws, and the outer
-      // handler turned that into a 500. a laptop client read that 500 on 2026-09-05 as "retrieval is
-      // broken on this machine" and could not tell it apart from a real fault, because a 500
-      // says the server broke while the truth was that the caller asked for a name that is not
-      // there. A 404 that names the fix cannot be misread that way.
-      // ASYNC, NOT execFileSync (2026-09-27). A synchronous child blocked the whole server until the
-      // decrypt finished: under load one read took 15 s and every recall from every machine waited
-      // behind it. Now other requests are served while it runs. A timeout is a 503, not a 404: the
-      // secret exists, the server was slow.
-      let value;
-      try {
-        value = await new Promise((ok, fail) => execFile(process.execPath, [join(BRAIN, 'tools', 'vault.mjs'), 'get', name],
-          { encoding: 'utf8', timeout: 15000, windowsHide: true },
-          (err, stdout, stderr) => err ? fail(Object.assign(err, { stderr })) : ok(stdout)));
-      } catch (e) {
-        audit('SECRET-MISS ' + name + ' by ' + ip + ' ' + (e.killed ? 'timeout' : String(e.stderr || e.message || '').split(String.fromCharCode(10))[0].slice(0, 160)));
-        if (e.killed) return json(res, 503, { error: 'vault busy', detail: 'the decrypt took over 15 s; retry in a few seconds' });
-        return json(res, 404, {
-          error: 'no such secret',
-          detail: 'the vault has no secret named "' + name + '". This is NOT a permission problem'
-            + ' and NOT the server being broken. Run: node tools/brain-client.mjs list',
-        });
-      }
-      audit('READ SECRET ' + name + ' by ' + ip);
-      return json(res, 200, { name, value });
-    }
-
-    // An agent on any machine stores a key it just obtained, so it never passes through a chat.
-    // The owner, 2026-10-07: "the agent gets the key it needs, sends it to you and you save it". Full-scope
-    // tokens only (checked above), value in the JSON body and on vault.mjs stdin, never in argv or a
-    // log. An existing name is refused unless replace is true, so a mistyped name cannot wipe a key.
-    if (path.startsWith('/vault/set/') && req.method === 'POST') {
-      const name = basename(decodeURIComponent(path.slice('/vault/set/'.length)));
-      if (!/^[a-z0-9][a-z0-9_]{1,59}$/.test(name)) return json(res, 400, { error: 'bad name', detail: 'lowercase letters, digits and _ only' });
-      let raw = '';
-      for await (const chunk of req) {
-        raw += chunk;
-        if (raw.length > 20_000) { req.destroy(); return; }
-      }
-      let body;
-      try { body = JSON.parse(raw || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
-      const value = String(body.value || '').trim();
-      if (!value) return json(res, 400, { error: 'empty value' });
-      const v = JSON.parse(readFileSync(join(BRAIN, 'vault.json'), 'utf8'));
-      if ((v.secrets || {})[name] && !mayReplace(caller, body)) {
-        return json(res, 409, { error: 'exists', detail: name + ' is already in the vault. ' + (caller.scope === 'full'
-          ? 'Pass --replace only if the owner asked for the old key to be replaced.'
-          : 'This token can only add new secrets; pick another name, or have it replaced with a full-scope token on the brain host.') });
-      }
-      const note = String(body.note || '').slice(0, 300) + ' (stored by ' + caller.name + ' ' + new Date().toISOString().slice(0, 10) + ')';
-      // --new unless replacing is allowed: the check above can be overtaken by a store landing in between, and
-      // vault.mjs decides it again under its own lock (audit 2026-11-01). Exit 3 is "already exists".
-      const onlyNew = !mayReplace(caller, body);
-      const result = await new Promise((ok) => {
-        const p = spawn(process.execPath, [join(BRAIN, 'tools', 'vault.mjs'), 'set', name, '--note', note.trim(), ...(onlyNew ? ['--new'] : [])],
-          { cwd: BRAIN, windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
-        let err = '';
-        p.stderr.on('data', (d) => { err += d; });
-        p.on('close', (code) => ok({ code, err }));
-        p.stdin.end(value);
-      });
-      if (result.code === 3 && onlyNew) {
-        audit('SECRET-SET-EXISTS ' + name + ' by ' + caller.name + ' ' + ip);
-        return json(res, 409, { error: 'exists', detail: name + ' was stored by someone else a moment ago and was not replaced.' });
-      }
-      if (result.code !== 0) {
-        audit('SECRET-SET-FAILED ' + name + ' by ' + caller.name + ' ' + ip);
-        return json(res, 500, { error: 'vault refused', detail: String(result.err).split(String.fromCharCode(10)).filter(Boolean).pop() });
-      }
-      // Retried (2026-10-16): three stores in a row reported "git backup failed" because a brain save was
-      // committing at the same moment (index.lock); committing by hand a minute later worked.
-      let pushed = false;
-      for (let attempt = 0; attempt < 5 && !pushed; attempt++) {
-        if (attempt) await new Promise((r) => setTimeout(r, 4000));
-        try {
-          // Async on purpose (2026-10-15): the synchronous git add, commit and push froze the whole server for
-          // about 3 s while a laptop client stored a key, and a search on the host failed in that window.
-          // In the shared brain write lock (2026-10-31), waiting at most 90 s: the caller is waiting on this answer.
-          await withBrainLock('brain-server: vault ' + name, async () => {
-            await runAsync('git', ['add', 'vault.json'], 30000);
-            await runAsync('git', ['com' + 'mit', '-m', 'vault: ' + name + ' stored by ' + caller.name, '--', 'vault.json'], 60000).catch((e) => { if (!/nothing to commit|no changes added/i.test(String(e.stdout || '') + String(e.stderr || ''))) throw e; });
-            await runAsync('git', ['push', '--quiet'], 60000);
-          }, 90000);
-          pushed = true;
-        } catch { /* lock held by a save: wait and try again */ }
-      }
-      audit('STORED SECRET ' + name + ' by ' + caller.name + ' ' + ip + (pushed ? '' : ' (git backup failed)'));
-      return json(res, 200, { ok: true, name, replaced: !!(v.secrets || {})[name], pushed });
-    }
-
-    // RETIRED 2026-08-21 by the move to per-machine age keys. This used to hand the shared vault
-    // passphrase to any caller with the bearer token, which meant one stolen token equalled every
-    // credential the owner owns, forever, on every machine.
-    //
-    // There is no shared secret to serve any more. A new machine generates its own keypair, keeps
-    // the private half, and publishes only the public half. Nothing sensitive crosses the network,
-    // so this route cannot be re-added without reintroducing the flaw.
-    if (path === '/vault/passphrase') {
-      audit('REFUSED retired /vault/passphrase from ' + ip);
-      return json(res, 410, {
-        error: 'retired: the vault no longer has a shared passphrase',
-        do: 'on the new machine run: node tools/vault.mjs machine-init, then send the PUBLIC key here and run: node tools/vault.mjs machine-add <NAME> <key> && node tools/vault.mjs grant --all --to <NAME>',
-      });
-    }
-
-    // ---- /layers : the context layers HAVOK owns, each with a version (tools/layer-host.mjs) ----
-    // The key is read from the raw request path, never the parsed one: the URL parser folds %2E%2E into a parent
-    // step, which would turn a refused key into a valid one.
-    const rawPath = String(req.url || '').split('?')[0];
-    if (req.method === 'GET' && path === '/layers/versions') {
-      const groups = String(url.searchParams.get('groups') || '').split(',').map((g) => g.trim()).filter(Boolean);
-      // The latest release rides this answer too (task 18); no layer key can be called release (layer-host validKey).
-      const release = releaseSummary(RELEASES_DIR);
-      return json(res, 200, { ...layerVersions(LAYERS_DIR, String(url.searchParams.get('machine') || ''), groups), ...(release ? { release } : {}) });
-    }
-    if (req.method === 'GET' && rawPath.startsWith('/layers/')) {
-      let key = '';
-      try { key = decodeURIComponent(rawPath.slice('/layers/'.length)); } catch { return json(res, 400, { error: 'bad layer key' }); }
-      const r = readLayer(LAYERS_DIR, key);
-      if (r.status !== 200) return json(res, r.status, { error: r.error });
-      const etag = '"' + r.version + '"';
-      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { etag }); return res.end(); }
-      res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', etag });
-      return res.end(r.text);
-    }
-
-    // ---- /release : the release HAVOK published (tools/release-host.mjs, task 18) ----
-    // /release/latest and /release/<version> answer the manifest, /release/<version>.zip the zip itself. The version is
-    // matched on the raw path against three plain numbers, so no other path can reach the disk through it.
-    if (req.method === 'GET' && rawPath.startsWith('/release/')) {
-      const rest = rawPath.slice('/release/'.length);
-      if (rest === 'latest') {
-        const s = releaseSummary(RELEASES_DIR);
-        return s ? json(res, 200, releaseManifest(RELEASES_DIR, s.version)) : json(res, 404, { error: 'no release published' });
-      }
-      const p = releasePath(rest);
-      if (!p) return json(res, 400, { error: 'bad release version' });
-      if (!p.zip) { const man = releaseManifest(RELEASES_DIR, p.version); return man ? json(res, 200, man) : json(res, 404, { error: 'no such release' }); }
-      const file = releaseZip(RELEASES_DIR, p.version);
-      if (!file) return json(res, 404, { error: 'no such release' });
-      const buf = readFileSync(file);
-      audit('RELEASE ' + ip + ' ' + caller.name + ' ' + p.version + ' ' + buf.length + 'b');
-      res.writeHead(200, { 'content-type': 'application/zip', 'content-length': buf.length });
-      return res.end(buf);
-    }
-
-    // ---- /dist : serve the code and the certificate to machines with no GitHub -------------
-    //
-    // The owner, 2026-08-24: the locked-down client machine cannot reach GitHub, it is blocked on the corporate
-    // WiFi. It reaches the brain server fine over Tailscale, so reads and writes work, but two
-    // things still only came from the repo: server-cert.pem and the tools/hooks themselves. If the
-    // certificate is ever regenerated that machine is locked out permanently, with no delivery
-    // path left, because Taildrop is also dead on that link.
-    //
-    // ALLOWLIST, never an arbitrary path. This route reads files off disk and hands them to a
-    // caller, so it is exactly the shape of a directory-traversal hole. Nothing is served unless
-    // it is named here, and vault.json is deliberately absent: a recall-scoped machine has no
-    // business holding the encrypted vault even though it could not decrypt it.
-    if (path === '/dist' || path.startsWith('/dist/')) {
-      // CODE ONLY. memory/ and index/ were published here for a few hours on 2026-09-04 and
-      // withdrawn the same day. the owner: "can we have one continuous connection to the server, and
-      // have one brain on the server, so that every recall goes from the server and every new
-      // memory goes in the server, not on a copy that gets commited."
-      //
-      // He was right and the copy earned nothing. Recall already runs server-side and the
-      // server's answer WINS over any local index (pre-turn.mjs, the serverRanked branch); the
-      // local index is only a fallback, and repairIndexInBackground already refreshes it from
-      // the server whenever the versions differ. Mirroring memory duplicated a mechanism that
-      // already existed and brought three bugs with it: a sweep race, permanent git dirt, and a
-      // pull that wedges on untracked files. Code is different: hooks and tools must be on disk
-      // to execute, which is the whole reason this route exists.
-      const allowed = distFiles;
-
-      // Serve the CANONICAL LF form, not what is on this disk.
-      //
-      // core.autocrlf is true on the host, so git checks out CRLF here while the repo stores LF.
-      // Serving those bytes raw left every mirroring machine permanently dirty in git: 8 files in
-      // tools/ differing from origin by line endings alone. Two consequences, the second serious.
-      // A real local change would eventually hide in that permanent list, and a commit made in
-      // that state pushes CRLF copies of the tools back and flips the repo's line endings, with
-      // the pre-commit hook re-staging so nobody has to choose it. CRLF has broken frontmatter
-      // parsing in this repo before. Found by a laptop client on 2026-09-04.
-      //
-      // Everything in the allowlist is text. Drop CR only where it precedes LF, so a lone CR in
-      // content is left alone.
-      const canonical = (buf) => {
-        let n = 0;
-        const o = Buffer.allocUnsafe(buf.length);
-        for (let i = 0; i < buf.length; i += 1) {
-          if (buf[i] === 13 && buf[i + 1] === 10) continue;
-          o[n] = buf[i];
-          n += 1;
+    try {
+        if (path === '/vault/list') {
+            const v = JSON.parse(readFileSync(join(BRAIN, 'vault.json'), 'utf8'));
+            let out = Object.entries(v.secrets || {}).map(([name, s]) => ({ name, updated: s.updated, note: s.note || '' }));
+            if (vAccess === 'own-list')
+                out = ownEntries(out, caller.name);
+            audit('list ' + ip + (vAccess === 'own-list' ? ' ' + caller.name + ' own only' : ''));
+            return json(res, 200, { secrets: out });
         }
-        return o.subarray(0, n);
-      };
-
-      // A cheap "has anything changed" probe. A machine polling every two minutes must not make
-      // the server read and hash 1.7MB of memory and embeddings each time, so this stats only:
-      // name, size, mtime. Cheap enough to call constantly, exact enough to never miss a write.
-      if (path === '/dist/version') {
-        return json(res, 200, distVersion(0));
-      }
-
-      if (path === '/dist') {
-        const files = [];
-        for (const rel of allowed()) {
-          try {
-            const buf = canonical(readFileSync(join(BRAIN, rel)));
-            files.push({ path: rel, bytes: buf.length, sha: createHash('sha256').update(buf).digest('hex').slice(0, 16) });
-          } catch { /* absent on this machine, skip */ }
+        if (path.startsWith('/vault/get/')) {
+            const name = basename(decodeURIComponent(path.slice('/vault/get/'.length)));
+            let value;
+            try {
+                value = await new Promise((ok, fail) => execFile(process.execPath, [join(BRAIN, 'tools', 'vault.mjs'), 'get', name], { encoding: 'utf8', timeout: 15000, windowsHide: true }, (err, stdout, stderr) => err ? fail(Object.assign(err, { stderr })) : ok(stdout)));
+            }
+            catch (e) {
+                audit('SECRET-MISS ' + name + ' by ' + ip + ' ' + (e.killed ? 'timeout' : String(e.stderr || e.message || '').split(String.fromCharCode(10))[0].slice(0, 160)));
+                if (e.killed)
+                    return json(res, 503, { error: 'vault busy', detail: 'the decrypt took over 15 s; retry in a few seconds' });
+                return json(res, 404, {
+                    error: 'no such secret',
+                    detail: 'the vault has no secret named "' + name + '". This is NOT a permission problem'
+                        + ' and NOT the server being broken. Run: node tools/brain-client.mjs list',
+                });
+            }
+            audit('READ SECRET ' + name + ' by ' + ip);
+            return json(res, 200, { name, value });
         }
-        audit('DIST-MANIFEST ' + ip + ' ' + caller.name + ' ' + files.length + ' files');
-        return json(res, 200, { files });
-      }
-
-      const rel = decodeURIComponent(path.slice('/dist/'.length));
-      if (!allowed().includes(rel)) {
-        audit('DIST-REFUSED ' + ip + ' ' + caller.name + ' ' + rel);
-        return json(res, 403, { error: 'not served', detail: 'only files listed by GET /dist are available' });
-      }
-      // Belt and braces on top of the allowlist: resolve and confirm it is still inside BRAIN.
-      const abs = resolve(BRAIN, rel);
-      if (!abs.startsWith(resolve(BRAIN))) {
-        audit('DIST-TRAVERSAL ' + ip + ' ' + caller.name + ' ' + rel);
-        return json(res, 400, { error: 'bad path' });
-      }
-      try {
-        const buf = canonical(readFileSync(abs));
-        audit('DIST ' + ip + ' ' + caller.name + ' ' + rel + ' ' + buf.length + 'b');
-        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-        return res.end(buf);
-      } catch {
-        return json(res, 404, { error: 'not found on the server' });
-      }
-    }
-
-    if (path === '/rules') {
-      return json(res, 200, JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')));
-    }
-
-    // ── SERVER AS SOURCE OF TRUTH ────────────────────────────────────────────────────────────
-    //
-    // The owner, 2026-08-22: "make the brain on this machine, and github only a copy backup, so later
-    // when this solution is perfected we can get a VPS and host it there."
-    //
-    // The VPS endgame is what makes this coherent: build it server-authoritative now and moving
-    // to a VPS is a URL change, not a redesign.
-    //
-    // THE PROBLEM THIS SOLVES, and it is a real one: a machine's clone can silently fall behind.
-    // This brain has had a plugin copy 204 commits behind and a cache copy holding 32 memories
-    // against 128. Nothing detected either; they were found by accident.
-    //
-    // THE PROBLEM IT MUST NOT CREATE: a machine reads about 500KB of index on every single turn.
-    // Fetching that per turn over the network would be far worse than a stale clone. So machines
-    // keep a CACHE and revalidate it against a version stamp, and the stamp is cheap enough to
-    // check constantly.
-    if (path === '/index/version') {
-      return json(res, 200, indexVersion());
-    }
-
-    if (path.startsWith('/index/')) {
-      // basename() so a crafted name cannot walk out of index/.
-      const name = basename(decodeURIComponent(path.slice('/index/'.length)));
-      const f = join(BRAIN, 'index', name);
-      if (!existsSync(f)) return json(res, 404, { error: 'no such index file' });
-      const body = readFileSync(f);
-      res.writeHead(200, {
-        'content-type': name.endsWith('.json') ? 'application/json' : 'text/plain; charset=utf-8',
-        'content-length': body.length,
-        // The version this file belongs to, so a client can tell a mid-update fetch from a clean one.
-        'x-brain-version': indexVersion().version,
-      });
-      return res.end(body);
-    }
-
-    // GET, EXPLICITLY. Without the method check this matched a DELETE to the same path, answered
-    // it with the memory's own content and a 200, and the delete route further down was never
-    // reached. The client read that as "REFUSED: unknown" and nothing was removed.
-    if (path.startsWith('/memory/') && req.method === 'GET') {
-      const slug = basename(decodeURIComponent(path.slice('/memory/'.length))).replace(/\.md$/, '');
-      const f = join(BRAIN, 'memory', slug + '.md');
-      if (!existsSync(f)) return json(res, 404, { error: 'no such memory' });
-      return json(res, 200, { slug, content: readFileSync(f, 'utf8') });
-    }
-
-    // ---- WRITE A MEMORY -------------------------------------------------------------------
-    //
-    // The owner, 2026-08-24: "why do we go through git, it is a backup of the server only. The reading
-    // AND writing of the brain is on the server. The brain 100% on the server."
-    //
-    // Until now the server was read-only and every machine wrote by committing to its own clone and
-    // pushing to GitHub. That worked, and the locked-down client machine proved it by landing 17 memories in
-    // an hour. But it meant every machine needed push access to the repo that carries hooks/ and
-    // tools/, which every other machine pulls and EXECUTES on every turn. A company laptop could
-    // change code running on his personal desktop. Scoped tokens did nothing about that, because
-    // the path went around the server entirely.
-    //
-    // Now a write is a request. The server validates it, writes it, reindexes, commits and pushes.
-    // No machine needs git write access, so that can be locked down separately.
-    //
-    // VALIDATED BEFORE IT LANDS, not after. A bad write here reaches every machine on the next
-    // pull, so the checks are deliberately strict and the refusals are specific enough to fix.
-    if (path === '/memory' && req.method === 'POST') {
-      let raw = '';
-      for await (const chunk of req) {
-        raw += chunk;
-        if (raw.length > 200_000) { req.destroy(); return; }
-      }
-      let body;
-      try { body = JSON.parse(raw || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
-      const slug = String(body.slug || '').trim();
-      const content = String(body.content || '');
-
-      // Slug shape. No dots, no slashes, no traversal: this becomes a filename.
-      if (!/^[a-z][a-z0-9_]{2,80}$/.test(slug)) {
-        return json(res, 400, { error: 'bad slug', detail: 'lowercase letters, digits and underscores only, 3 to 81 chars. No dots or slashes.' });
-      }
-      const prefix = slug.split('_')[0];
-      const TYPES = ['user', 'contact', 'project', 'feedback', 'reference'];
-      if (!TYPES.includes(prefix)) {
-        return json(res, 400, { error: 'bad prefix', detail: 'slug must start with one of: ' + TYPES.join(', ') });
-      }
-      if (content.length < 40) return json(res, 400, { error: 'too short', detail: 'a memory needs frontmatter and a body' });
-
-      // Frontmatter. description is the ENTIRE retrieval surface: nothing else is indexed, so a
-      // memory without one exists and can never be found, which is worse than not writing it.
-      const fm = content.replace(/\r\n/g, '\n');
-      if (!fm.startsWith('---')) return json(res, 400, { error: 'no frontmatter' });
-      const end = fm.indexOf('\n---', 3);
-      if (end < 0) return json(res, 400, { error: 'unterminated frontmatter' });
-      const head = fm.slice(3, end);
-      const field = (k) => (head.match(new RegExp('^\\s*' + k + ':\\s*(.+)$', 'm')) || [])[1];
-      const desc = field('description');
-      if (!field('name')) return json(res, 400, { error: 'missing name' });
-      if (!desc || desc.trim().length < 20) {
-        return json(res, 400, { error: 'missing or thin description', detail: 'the description is the only thing indexed for recall. Write it in the words the owner would type, at least 20 chars.' });
-      }
-      // TYPE MUST BE TOP LEVEL, not nested under metadata, and it must be present.
-      //
-      // field() searches with the m flag, so it happily matched an INDENTED "  type:" under
-      // metadata and let the write through. The mind-map builder only reads top-level keys, so
-      // reflect.mjs then failed the contract, and a failing reflection blocks the pre-commit gate
-      // on EVERY machine. On 2026-09-09 the WhatsApp instance wrote exactly that shape from a
-      // live client conversation and jammed commits brain-wide until someone found it by hand.
-      // Same poison-pill shape as a broken wikilink, so it is rejected in the same place: here,
-      // while the author is still around to fix it.
-      const topType = (head.match(/^type:[ 	]*(.+)$/m) || [])[1];
-      if (!topType) {
-        return json(res, 400, {
-          error: 'type must be top level',
-          detail: 'add a line "type: ' + prefix + '" at the top level of the frontmatter. Nested under metadata does not count: the mind map cannot see it and reflection then blocks commits on every machine.',
-        });
-      }
-      if (topType.trim() !== prefix) {
-        return json(res, 400, { error: 'type mismatch', detail: 'frontmatter type "' + topType.trim() + '" does not match slug prefix "' + prefix + '"' });
-      }
-
-      // WIKILINKS MUST POINT SOMEWHERE. This is not style, it is a poison pill.
-      //
-      // A memory with a broken edge lands on the server, then the pre-commit gate refuses EVERY
-      // subsequent commit from EVERY machine until someone finds it. That happened on 2026-08-24:
-      // a laptop client wrote a memory linking to reference_gate_docker_ram_trap, which does not exist, and
-      // the whole brain stopped being able to commit. Reject at write time, where the author is
-      // still here to fix it, rather than leaving a landmine for whoever commits next.
-      const links = [...new Set((fm.match(/\[\[([^\]]+)\]\]/g) || [])
-        .map((l) => l.slice(2, -2).trim()))];
-      // RESOLVE THE SAME WAY reflect.mjs DOES, or this refuses links the brain's own linter accepts.
-      //
-      // The first version only checked whether memory/<link>.md existed. But a wikilink may name
-      // either the filename stem OR the frontmatter `name`, normalized, which is how
-      // [[workout-muscle-recovery]] legitimately points at feedback_workout_muscle_recovery.md.
-      // Being stricter than the linter did not make the brain safer, it made every memory using
-      // the name form UNWRITABLE through the server, which is now the only write path. Caught
-      // 2026-08-24 trying to update reference_dashboards_auth_finance_autoworkout, whose four links
-      // reflect reports as "Broken wikilinks (0)".
-      const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
-      const resolvable = new Set([norm(slug)]);
-      try {
-        for (const f of readdirSync(join(BRAIN, 'memory'))) {
-          if (!f.endsWith('.md') || f === 'MEMORY.md') continue;
-          resolvable.add(norm(f.slice(0, -3)));
-          const head = readFileSync(join(BRAIN, 'memory', f), 'utf8').slice(0, 600);
-          const nm = /^name:\s*(.+)$/m.exec(head);
-          if (nm) resolvable.add(norm(nm[1].replace(/["']/g, '')));
+        if (path.startsWith('/vault/set/') && req.method === 'POST') {
+            const name = basename(decodeURIComponent(path.slice('/vault/set/'.length)));
+            if (!/^[a-z0-9][a-z0-9_]{1,59}$/.test(name))
+                return json(res, 400, { error: 'bad name', detail: 'lowercase letters, digits and _ only' });
+            let raw = '';
+            for await (const chunk of req) {
+                raw += chunk;
+                if (raw.length > 20000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            let body;
+            try {
+                body = JSON.parse(raw || '{}');
+            }
+            catch {
+                return json(res, 400, { error: 'bad json' });
+            }
+            const value = String(body.value || '').trim();
+            if (!value)
+                return json(res, 400, { error: 'empty value' });
+            const v = JSON.parse(readFileSync(join(BRAIN, 'vault.json'), 'utf8'));
+            if ((v.secrets || {})[name] && !mayReplace(caller, body)) {
+                return json(res, 409, { error: 'exists', detail: name + ' is already in the vault. ' + (caller.scope === 'full'
+                        ? 'Pass --replace only if the person asked for the old key to be replaced.'
+                        : 'This token can only add new secrets; pick another name, or have it replaced with a full-scope token on the brain host.') });
+            }
+            const note = String(body.note || '').slice(0, 300) + ' (stored by ' + caller.name + ' ' + new Date().toISOString().slice(0, 10) + ')';
+            const onlyNew = !mayReplace(caller, body);
+            const result = await new Promise((ok) => {
+                const p = spawn(process.execPath, [join(BRAIN, 'tools', 'vault.mjs'), 'set', name, '--note', note.trim(), ...(onlyNew ? ['--new'] : [])], { cwd: BRAIN, windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+                let err = '';
+                p.stderr.on('data', (d) => { err += d; });
+                p.on('close', (code) => ok({ code, err }));
+                p.stdin.end(value);
+            });
+            if (result.code === 3 && onlyNew) {
+                audit('SECRET-SET-EXISTS ' + name + ' by ' + caller.name + ' ' + ip);
+                return json(res, 409, { error: 'exists', detail: name + ' was stored by someone else a moment ago and was not replaced.' });
+            }
+            if (result.code !== 0) {
+                audit('SECRET-SET-FAILED ' + name + ' by ' + caller.name + ' ' + ip);
+                return json(res, 500, { error: 'vault refused', detail: String(result.err).split(String.fromCharCode(10)).filter(Boolean).pop() });
+            }
+            let pushed = false;
+            for (let attempt = 0; attempt < 5 && !pushed; attempt++) {
+                if (attempt)
+                    await new Promise((r) => setTimeout(r, 4000));
+                try {
+                    await withBrainLock('brain-server: vault ' + name, async () => {
+                        await runAsync('git', ['add', 'vault.json'], 30000);
+                        await runAsync('git', ['com' + 'mit', '-m', 'vault: ' + name + ' stored by ' + caller.name, '--', 'vault.json'], 60000).catch((e) => { if (!/nothing to commit|no changes added/i.test(String(e.stdout || '') + String(e.stderr || '')))
+                            throw e; });
+                        await runAsync('git', ['push', '--quiet'], 60000);
+                    }, 90000);
+                    pushed = true;
+                }
+                catch { }
+            }
+            audit('STORED SECRET ' + name + ' by ' + caller.name + ' ' + ip + (pushed ? '' : ' (git backup failed)'));
+            return json(res, 200, { ok: true, name, replaced: !!(v.secrets || {})[name], pushed });
         }
-      } catch { /* unreadable memory dir is a bigger problem, handled by the outer catch */ }
-      // The incoming memory's own frontmatter name counts too, for a self-link on a new file.
-      const ownName = /^name:\s*(.+)$/m.exec(fm);
-      if (ownName) resolvable.add(norm(ownName[1].replace(/["']/g, '')));
-      const dead = links.filter((l) => !resolvable.has(norm(l)));
-      if (dead.length) {
-        return json(res, 400, { error: 'broken wikilink', detail: 'these point at memories that do not exist: '
-          + dead.join(', ') + '. Create them first, or drop the link. A broken edge blocks commits for every machine.' });
-      }
-
-      // A MEMORY COMES LINKED WHEN THERE IS SOMETHING TO LINK IT TO. The owner, 2026-10-02: agents were told to link
-      // and did not, and the server accepted the write, then the commit gate refused it silently and every later
-      // write from every machine stuck behind it (seven memories from one machine in two days). So an
-      // unlinked memory is refused here, with the closest memories offered, and the writing agent picks the one
-      // it really relates to. Only a memory with nothing close goes in as a leaf. LINK_BAR is set below the 0.55 that
-      // stored memories show, because a short new memory scores lower against them: a test signature memory found its
-      // true neighbour at 0.53. Measured 2026-10-02: 3 of 678 memories have no neighbour at 0.45 or above.
-      // `leaf: true` in the header is the author saying nothing really relates, even if something is close in
-      // meaning (one memory's closest neighbour was an unrelated error note, not the person it was about). Accepted and logged.
-      const leaf = /^leaf:\s*true\s*$/m.test(head);
-      if (!links.length && leaf) audit('MEMORY-WRITE-LEAF ' + ip + ' ' + caller.name + ' ' + slug);
-      if (!links.length && !leaf) {
-        const LINK_BAR = 0.45;
-        try {
-          const emb = JSON.parse(readFileSync(join(BRAIN, 'index', 'embeddings.json'), 'utf8'));
-          const bodyText = fm.slice(end + 4).replace(/\s+/g, ' ').trim().slice(0, 1200);
-          const e = await getEmbedder();
-          const v = (await e(slug.replace(/_/g, ' ') + '. ' + desc + ' ' + bodyText, { pooling: 'mean', normalize: true })).data;
-          const near = emb.slugs.map((s, i) => { let d = 0; const w = emb.vectors[i]; for (let k = 0; k < w.length; k++) d += v[k] * w[k]; return [s, d]; })
-            .filter(([s, d]) => s !== slug && !EPHEMERAL_SLUG.test(s) && d >= LINK_BAR).sort((a, b) => b[1] - a[1]).slice(0, 6);
-          if (near.length) {
-            audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' no links, ' + near.length + ' candidates');
-            return json(res, 400, { error: 'no links', candidates: near.map(([s]) => s),
-              detail: 'add at least one [[slug]] to a memory this one depends on, changes or is used with. Closest by meaning: '
-                + near.map(([s, d]) => s + ' (' + d.toFixed(2) + ')').join(', ') + '. Link the one it really relates to, not just the first. If none of them truly relates, add "leaf: true" to the header.' });
-          }
-        } catch (err) { audit('LINK-CHECK-SKIPPED ' + slug + ' ' + String(err.message).slice(0, 80)); }
-      }
-
-      const file = join(BRAIN, 'memory', slug + '.md');
-      const existed = existsSync(file);
-      const mAccess = memoryAccess(caller, { method: 'POST', slug, exists: existed, force: false });
-      if (mAccess !== 'allow') {
-        audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + mAccess);
-        return json(res, 403, { error: 'not allowed', detail: mAccess });
-      }
-      try {
-        await saveGate;
-        writeFileSync(file, fm, 'utf8');
-        // THE WRITER GETS ITS ANSWER NOW, THE INDEX AND THE BACKUP FOLLOW. The owner, 2026-09-17: "that call
-        // should be in the back end, no need to block us, and this should be the standard for all
-        // agent brain functionalities, it shouldn't affect the flow of the conversation".
-        //
-        // Reindex, commit and push used to run here with execFileSync. That blocked the caller AND
-        // froze this whole process, so every memory written from any machine stalled every other
-        // machine's recall: the analyzer reported "brain server did not answer /health" at 10:06 and
-        // 10:31 that day, each right after the locked-down client machine wrote a memory. Validation and the
-        // file write stay above, synchronous, because a bad write must still be refused while the
-        // author is there. What is queued can no longer fail in a way the author could fix.
-        // The cost, accepted: recall can miss a brand new memory for the few seconds indexing takes.
-        // Who wrote it: the writer's own account of itself (session, name, model, effort), with the machine taken from
-        // the token that called, which the writer cannot fake (tools/provenance.mjs).
-        recordProvenance([{ slug, action: existed ? 'update' : 'new' }], { ...(body.by || {}), machine: caller.name }, 'server');
-        queueBrainSave(slug, existed, caller.name, ip);
-        return json(res, 200, { ok: true, slug, updated: existed, queued: true, pushed: null, v: indexVersion().version });
-      } catch (e) {
-        audit('MEMORY-WRITE-FAIL ' + ip + ' ' + caller.name + ' ' + slug + ' ' + String(e.message).slice(0, 80));
-        return json(res, 500, { error: 'write failed', detail: String(e.message).slice(0, 200) });
-      }
-    }
-
-    /* ---- DELETE A MEMORY -----------------------------------------------------------------
-       The owner, 2026-09-21: "we need to allow memories to be deleted, because the git memory and the
-       local brain memory keep breaking the brain recall."
-       Until now nothing anywhere could remove one. A memory could be corrected or superseded and
-       never withdrawn, so a fact that turned out to be wrong stayed in recall forever and the only
-       remedy was editing it into a note saying it was wrong.
-
-       NOTHING IS UNLINKED. The file moves to deleted/ at the brain root with a line saying who
-       removed it, when and why, so any delete can be undone by moving it back. The graveyard is
-       committed with everything else: a memory that mattered enough to write is worth keeping the
-       body of.
-
-       INBOUND LINKS ARE CHECKED FIRST, because a wikilink pointing at a memory that no longer
-       exists is a broken edge, and a broken edge REFUSES every later write from every machine.
-       Deleting carelessly would wedge the whole brain, so the refusal names the files to fix. */
-    if (path.startsWith('/memory/') && req.method === 'DELETE') {
-      const slug = basename(decodeURIComponent(path.slice('/memory/'.length))).replace(/\.md$/, '');
-      if (!/^[a-z][a-z0-9_]{2,80}$/.test(slug)) return json(res, 400, { error: 'bad slug' });
-      const file = join(BRAIN, 'memory', slug + '.md');
-      if (!existsSync(file)) return json(res, 404, { error: 'no such memory', detail: slug + ' is not on the server.' });
-
-      let raw = '';
-      for await (const chunk of req) { raw += chunk; if (raw.length > 20_000) { req.destroy(); return; } }
-      let body = {};
-      try { body = JSON.parse(raw || '{}'); } catch { /* a reason is optional in shape, not in policy */ }
-      const dAccess = memoryAccess(caller, { method: 'DELETE', slug, exists: true, force: !!body.force });
-      if (dAccess !== 'allow') {
-        audit('MEMORY-DELETE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + dAccess);
-        return json(res, 403, { error: 'not allowed', detail: dAccess });
-      }
-      const why = String(body.why || '').trim();
-      if (why.length < 10) {
-        return json(res, 400, { error: 'no reason', detail: 'say why in at least ten characters. A deletion with no reason is indistinguishable from an accident.' });
-      }
-
-      // Who points at it. The name form counts as well as the filename form, the same way the
-      // write path resolves links, or this would refuse deletions over links that are not real.
-      const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
-      const ownNames = new Set([norm(slug)]);
-      try {
-        const head = readFileSync(file, 'utf8').slice(0, 600);
-        const nm = /^name:\s*(.+)$/m.exec(head);
-        if (nm) ownNames.add(norm(nm[1].replace(/["']/g, '')));
-      } catch { /* read failure is handled below */ }
-      const pointing = [];
-      try {
-        for (const f of readdirSync(join(BRAIN, 'memory'))) {
-          if (!f.endsWith('.md') || f === 'MEMORY.md' || f === slug + '.md') continue;
-          const txt = readFileSync(join(BRAIN, 'memory', f), 'utf8');
-          const links = [...txt.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => norm(m[1]));
-          if (links.some((l) => ownNames.has(l))) pointing.push(f.slice(0, -3));
+        if (path === '/vault/passphrase') {
+            audit('REFUSED retired /vault/passphrase from ' + ip);
+            return json(res, 410, {
+                error: 'retired: the vault no longer has a shared passphrase',
+                do: 'on the new machine run: node tools/vault.mjs machine-init, then send the PUBLIC key here and run: node tools/vault.mjs machine-add <NAME> <key> && node tools/vault.mjs grant --all --to <NAME>',
+            });
         }
-      } catch { /* handled by the outer catch */ }
-      if (pointing.length && !body.force) {
-        return json(res, 409, {
-          error: 'still linked',
-          detail: pointing.length + ' memories link to ' + slug + ': ' + pointing.slice(0, 12).join(', ')
-            + '. A link to a memory that does not exist is a broken edge and it blocks writes for every'
-            + ' machine. Remove those links first, or repeat with force to have them left as they are.',
-          linked: pointing,
-        });
-      }
-
-      /* THE BACKUP IS OUT OF REACH, ON PURPOSE. The owner, 2026-09-21: "it is good that we keep a non
-         accessable back up of the deleted memory in case the agent deleted something it shouldn't
-         have." So the body does not go to a folder in the repo, where it would be committed, greppable
-         and one Read away from any agent. It goes OUTSIDE the brain, next to the machine's own keys,
-         encrypted to this machine's age public key.
-         What that does and does not buy, plainly: it is not in git, not in the index, not in recall,
-         not served by any route, and unreadable on any other machine even with the file in hand.
-         It does NOT stop an agent with a shell ON THIS MACHINE from running age against the key, and
-         nothing stored here could. Recovery is deliberate: node tools/graveyard.mjs restore <slug>. */
-      try {
-        const grave = join(CONFIG_DIR, 'brain-graveyard');
-        mkdirSync(grave, { recursive: true });
-        const stamp = new Date().toISOString();
-        const note = '<!-- deleted ' + stamp + ' by ' + caller.name + ' from ' + ip + ': ' + why.slice(0, 300) + ' -->\n';
-        const plain = note + readFileSync(file, 'utf8');
-        // The registry names its own host, which is the machine holding the private half. Reading
-        // the OS hostname instead would break the day the box is renamed.
-        const reg = JSON.parse(readFileSync(join(BRAIN, 'vault-recipients.json'), 'utf8')) || {};
-        const pub = ((reg.machines || {})[reg.host] || {}).pubkey;
-        if (!pub) throw new Error('no age recipient for this machine, refusing to delete without a recoverable backup');
-        // STDIN, never argv: the body of a memory is not going on a command line.
-        const sealed = execFileSync('age', ['-r', pub, '-a'], { input: plain, encoding: 'utf8' });
-        writeFileSync(join(grave, slug + '.' + stamp.replace(/[:.]/g, '-') + '.age'), sealed, 'utf8');
-        rmSync(file);
-        audit('MEMORY-DELETE ' + ip + ' ' + caller.name + ' ' + slug + ' :: ' + why.slice(0, 120));
-        recordProvenance([{ slug, action: 'delete' }], { ...(body.by || {}), machine: caller.name }, 'server');
-        queueBrainSave(slug, true, caller.name, ip);
-        return json(res, 200, { ok: true, slug, deleted: true, linked: pointing, queued: true });
-      } catch (e) {
-        audit('MEMORY-DELETE-FAIL ' + ip + ' ' + caller.name + ' ' + slug + ' ' + String(e.message).slice(0, 80));
-        return json(res, 500, { error: 'delete failed', detail: String(e.message).slice(0, 200) });
-      }
-    }
-
-    // THE AGENT'S DESCRIBED SEARCH (The owner, 2026-10-15: "activate it and run some tests on the costs with it for
-    // like a week"). The agent rewrites his message as 1 to 8 needs; each need is searched on its own and a memory
-    // is kept when keyword and meaning both found it, or when its meaning score reaches SEARCH_MIN (0.50, measured
-    // on 60 judged messages: 10.6 per message, 71% of needed memories, against 36 and 60% for the raw message).
-    // Links are not followed. LEARNED items (what the agent learned or was corrected on since the last message)
-    // come back with their closest memories, so the agent can tell saved, contradicted or missing.
-    if (path === '/search' && req.method === 'POST') {
-      let sbody = '';
-      for await (const chunk of req) { sbody += chunk; if (sbody.length > 100_000) { req.destroy(); return; } }
-      let sp; try { sp = JSON.parse(sbody || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
-      // Up to 20 needs (The owner, 2026-10-15: a long message or a file of instructions has many topics; 8 short ones lose memories).
-      const strs = (a, n) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string' && x.trim()).slice(0, n).map((x) => x.slice(0, 1000)) : []);
-      const needs = strs(sp.needs, 20), learned = strs(sp.learned, 10);
-      if (!needs.length && !learned.length) return json(res, 400, { error: 'needs or learned required' });
-      const SEARCH_MIN = 0.5, LEARNED_SHOW = 0.45;
-      const ts = Date.now();
-      const emb = JSON.parse(readFileSync(join(BRAIN, 'index', 'embeddings.json'), 'utf8'));
-      const kwd = JSON.parse(readFileSync(join(BRAIN, 'index', 'keywords.json'), 'utf8'));
-      const e = await getEmbedder();
-      // A failed or timed out embedding leaves the keyword matches recall already found, rather than failing the search.
-      let searchDegraded = '';
-      const vec = async (t) => { try { return (await e(t, { pooling: 'mean', normalize: true })).data; } catch (err) { searchDegraded = String(err.message).slice(0, 160); return null; } };
-      const scores = (v) => (!v ? [] : emb.slugs.map((sl, i) => { let d = 0; const w = emb.vectors[i]; for (let k = 0; k < w.length; k++) d += v[k] * w[k]; return [sl, d]; }));
-      const keep = new Map();
-      for (const n of needs) {
-        // Matched by both channels, plus the top 3 of the normal recall whichever channel found them. Only "both" or
-        // meaning 0.5 was kept before, and a wanted memory scores about 0.47 on meaning alone (recall-lab, 2026-10-12):
-        // on 2026-10-23 a search for a research-call convention returned nothing while recall had the right memory
-        // first, so an agent used a retired free tier.
-        const fused = await recall(n, [n], 5, 0, false, 0, -1);
-        if (fused.degraded) searchDegraded = fused.degraded;
-        for (const h of fused) if (h.how === 'both') keep.set(h.slug, { score: 1, how: 'both' });
-        for (const h of fused.filter((x) => x.how !== 'linked').slice(0, 3)) if (!keep.has(h.slug)) keep.set(h.slug, { score: 0.5, how: h.how });
-        for (const [sl, d] of scores(await vec(n))) if (d >= SEARCH_MIN && (!keep.has(sl) || keep.get(sl).score < d)) keep.set(sl, { score: d, how: keep.get(sl)?.how || 'meaning' });
-      }
-      const memories = [...keep.entries()].sort((a, b) => b[1].score - a[1].score)
-        .map(([sl, v]) => ({ slug: sl, how: v.how, score: +Math.min(v.score, 1).toFixed(3), description: String(kwd.descriptions[sl] || '').slice(0, 160) }));
-      const learnedOut = [];
-      for (const l of learned) {
-        const near = scores(await vec(l)).filter(([, d]) => d >= LEARNED_SHOW).sort((a, b) => b[1] - a[1]).slice(0, 3)
-          .map(([sl, d]) => ({ slug: sl, score: +d.toFixed(3), description: String(kwd.descriptions[sl] || '').slice(0, 200) }));
-        learnedOut.push({ item: l, closest: near });
-      }
-      audit('SEARCH ' + ip + ' needs=' + needs.length + ' learned=' + learned.length + ' hits=' + memories.length + ' ' + (Date.now() - ts) + 'ms');
-      return json(res, 200, { memories, learned: learnedOut, v: indexVersion().version, ...(searchDegraded ? { note: KEYWORD_ONLY_NOTE + searchDegraded + '.' } : {}) });
-    }
-
-    // ONE REQUEST PER MESSAGE for the mod (context release, 2026-11-02): body { prompt, previous (the last user
-    // messages, up to 3), session, machine, agent, groups?, bodies? }, answer { memories [{ slug, description, why }],
-    // droppedEarlier, note, layers? }. tools/recall-turn.mjs holds the query building that hooks/pre-turn.mjs did on
-    // each machine, and the per-session list of memories already shown. The pulse line is written here, since the mod
-    // posts none. The audit line counts only, never the prompt or the slugs.
-    if (path === '/recall/turn' && req.method === 'POST') {
-      let tbody = '';
-      for await (const chunk of req) { tbody += chunk; if (tbody.length > 200_000) { req.destroy(); return; } }
-      let tp; try { tp = JSON.parse(tbody || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
-      if (typeof tp.prompt !== 'string' || !tp.prompt.trim()) return json(res, 400, { error: 'prompt required' });
-      tp.previous = (Array.isArray(tp.previous) ? tp.previous : []).filter((x) => typeof x === 'string').slice(-3).map((x) => x.slice(0, 4000));
-      tp.prompt = tp.prompt.slice(0, 20000);
-      tp.machine = String(tp.machine || '').slice(0, 64);
-      const tt = Date.now();
-      const out = await recallTurn(tp);
-      try { serverAlerts.recall(Date.now() - tt); } catch { /* an alert never fails the recall answer */ }
-      if (out.memories.length) {
-        try {
-          const PULSE = join(BRAIN, '.recall-pulse.jsonl');
-          appendFileSync(PULSE, JSON.stringify({ at: Date.now(), host: tp.machine || caller.name, slugs: out.memories.map((m) => m.slug).slice(0, 20), how: out.memories.map((m) => m.why).slice(0, 20) }) + '\n', 'utf8');
-          const lines = readFileSync(PULSE, 'utf8').split('\n').filter(Boolean);
-          if (lines.length > 800) writeFileSync(PULSE, lines.slice(-600).join('\n') + '\n', 'utf8');
-        } catch { /* bookkeeping only */ }
-      }
-      // The published code version, so a mirroring machine pulls on change (hardening item 3).
-      try { out.distVersion = distVersion().version; } catch { /* the recall answer never fails for it */ }
-      // When the shared Gemini quota reading was taken, so a machine with an older copy fetches it (agy-quota-store.mjs).
-      try { const q = readQuota(BRAIN); if (q && q.at) out.agyQuotaAt = q.at; } catch { /* the recall answer never fails for it */ }
-      // The count of decisions waiting for the owner's review, for the mod's status line.
-      try { out.decisionsWaiting = decisionsWaiting(BRAIN); } catch { /* the recall answer never fails for it */ }
-      // the owner's decisions that match this prompt, next to the memories (The owner, 2026-11-04), so an agent checks the log
-      // before asking him. At most 3, only clear matches (decision-store search, recall mode). A reversed one carries
-      // the owner's note, so the deciding agent sees the reversal here even where no agent messages are configured.
-      try {
-        const ds = searchDecisions(BRAIN, tp.prompt, { limit: 3, recall: true });
-        if (ds.length) out.decisions = ds.map((d) => ({ id: d.id, at: d.at, by: d.by || d.agent, agent: d.agent, area: d.area, what: d.what, state: d.state, ...(d.state === 'reversed' && d.review && d.review.note ? { note: String(d.review.note).slice(0, 300) } : {}) }));
-      } catch { /* the recall answer never fails for it */ }
-      audit('RECALL-TURN ' + ip + ' ' + caller.name + ' chars=' + tp.prompt.length + ' hits=' + out.memories.length + ' earlier=' + out.memories.filter((m) => m.why === 'earlier').length + ' dropped=' + out.droppedEarlier.length + ' ' + (Date.now() - tt) + 'ms');
-      return json(res, 200, out);
-    }
-
-    if (path === '/recall' && req.method === 'POST') {
-      let rbody = '';
-      for await (const chunk of req) {
-        rbody += chunk;
-        if (rbody.length > 200_000) { req.destroy(); return; }
-      }
-      let rp;
-      try { rp = JSON.parse(rbody || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
-      const prompt = typeof rp.prompt === 'string' ? rp.prompt : '';
-      if (!prompt.trim()) return json(res, 400, { error: 'prompt required' });
-      // The caller may send prepared chunks (a long prompt already split, or an Arabic prompt
-      // already translated). If it does not, the whole prompt is the single query.
-      const queries = Array.isArray(rp.queries) && rp.queries.length
-        ? rp.queries.filter((t) => typeof t === 'string' && t.trim()).slice(0, 16)
-        : [prompt.slice(0, 4000)];
-      const tr = Date.now();
-      // Capped hard at 4000 per memory however much a caller asks for: five hits at the default
-      // 1500 is about 7 KB on the wire and in the agent's context, every turn, on every machine.
-      const bodyChars = rp.bodies === false ? 0
-        : rp.bodies ? Math.min(Math.max(Number(rp.bodyChars) || 1500, 200), 4000) : 0;
-      const ranked = await recall(prompt, queries, Math.min(Math.max(Number(rp.limit) || 5, 1), 20), bodyChars, rp.limit != null, Math.max(0, Math.min(Number(rp.parts) || 0, 16)), (Number.isInteger(rp.contextIndex) && prompt.trim().length >= SHORT_FOLLOW_UP) ? rp.contextIndex : -1);
-      // Counts only. Never the prompt, never the matched slugs.
-      audit('RECALL ' + ip + ' q=' + queries.length + ' chars=' + prompt.length
-        + ' hits=' + ranked.length + (bodyChars ? ' bodies=' + bodyChars : '') + (ranked.degraded ? ' keyword-only' : '') + ' ' + (Date.now() - tr) + 'ms');
-      // The same words the hook uses when it falls back itself, so an agent reads one kind of note for one kind of loss.
-      return json(res, 200, { ranked, v: indexVersion().version, ...(ranked.degraded ? { note: KEYWORD_ONLY_NOTE + ranked.degraded + '.' } : {}) });
-    }
-
-    // WHICH MEMORIES A MACHINE ACTUALLY USED, collected centrally.
-    //
-    // The owner, 2026-09-15: "can you check if its working, because the other machine is on and
-    // recalling". It was, and the map showed it as idle, because each machine wrote its recall
-    // log to its OWN disk and nothing ever collected them. A machine that cannot reach GitHub
-    // can still reach this server, which is how it recalls in the first place, so this is the
-    // one channel every machine already has.
-    //
-    // ON PRIVACY, because this is a deliberate reversal. The audit line for /recall records
-    // counts only, never the prompt and never the matched slugs, and that stays true. This route
-    // records slugs and nothing else: no prompt, no answer, no content. A slug is the filename of
-    // a memory that is already sitting on this same disk, so writing it next to them adds no
-    // exposure. The prompt is what must never be written down, and it still is not.
-    // THE DECISION LOG (tools/decision-review.mjs, whose header has the whole access model). Here, behind the bearer
-    // token checked above, so no caller without a brain token reaches any of these. On a stock install:
-    //   POST /decisions, GET /decisions (?q= search), GET /decisions/count: any token, the owner's and every agent's.
-    //   POST /decisions/<id>/review: only agent@<token machine> listed in brain.json decisionReviewerAgents (empty by
-    //   default, so nobody), and never on that agent's own decision. The owner reviews on the separate 127.0.0.1 page.
-    if (path === '/decisions' || path === '/decisions/count' || /^\/decisions\/[A-Za-z0-9_-]{1,64}\/review$/.test(path)) {
-      if (await handleDecisionRoute(req, res, { brain: BRAIN, path, url, caller, audit, getToken: () => TOKEN })) return;
-    }
-
-
-    if (path === '/pulse' && req.method === 'POST') {
-      let pbody = '';
-      for await (const chunk of req) {
-        pbody += chunk;
-        if (pbody.length > 20_000) { req.destroy(); return; }
-      }
-      let pp;
-      try { pp = JSON.parse(pbody || '{}'); } catch { return json(res, 400, { error: 'bad json' }); }
-      const host = String(pp.host || '').slice(0, 64);
-      const slugs = Array.isArray(pp.slugs)
-        ? pp.slugs.filter((x) => typeof x === 'string').slice(0, 20).map((x) => x.slice(0, 200))
-        : [];
-      const how = Array.isArray(pp.how)
-        ? pp.how.filter((x) => typeof x === 'string').slice(0, 20)
-        : [];
-      if (!host || !slugs.length) return json(res, 400, { error: 'host and slugs required' });
-      // The hook on THIS machine already wrote the line locally before posting. Appending it
-      // again here would double every recall the server itself makes.
-      if (host.toUpperCase() === hostname().toUpperCase()) return json(res, 200, { ok: true, skipped: 'local' });
-      const at = Number(pp.at) || Date.now();
-      try {
-        const PULSE = join(BRAIN, '.recall-pulse.jsonl');
-        appendFileSync(PULSE, JSON.stringify({ at, host, slugs, how }) + '\n', 'utf8');
-        const lines = readFileSync(PULSE, 'utf8').split('\n').filter(Boolean);
-        if (lines.length > 800) writeFileSync(PULSE, lines.slice(-600).join('\n') + '\n', 'utf8');
-      } catch { /* bookkeeping only */ }
-      audit('PULSE ' + ip + ' host=' + host + ' hits=' + slugs.length);
-      return json(res, 200, { ok: true });
-    }
-
-    if (path === '/embed' && req.method === 'POST') {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
-        if (body.length > 100_000) { req.destroy(); return; }
-      }
-      const parsed = JSON.parse(body || '{}');
-
-      // BATCH: accept an array of texts and answer in ONE round trip.
-      //
-      // Added 2026-08-22 after watching the cost on a real remote prompt. Chunking a long prompt
-      // made pre-turn.mjs issue 8 sequential calls, and from a laptop client that measured:
-      //   server time  273ms total across the 8
-      //   wall clock  2083ms
-      // So about 226ms per call was pure round-trip overhead, and a long prompt went from ~130ms
-      // to over 2 seconds before the reply even started. The model itself was never the problem.
-      //
-      // One request, one model batch, one response. The per-call overhead is paid once.
-      if (Array.isArray(parsed.texts)) {
-        const texts = parsed.texts.filter((t) => typeof t === 'string' && t.trim()).slice(0, 16);
-        if (!texts.length) return json(res, 400, { error: 'texts must be a non-empty array of strings' });
-        const tb = Date.now();
-        const embedB = await getEmbedder();
-        const vectors = [];
-        // A LOOP, deliberately, not embedB(texts).
-        //
-        // The pipeline does accept an array and returns one [n, 384] tensor, and it is about 1.5x
-        // faster. It also returns DIFFERENT VECTORS: measured 2026-08-22, max element difference
-        // 2.21e-2 against the loop on identical input, which is far more than enough to reorder
-        // recall results. An array input pads every sequence to the longest one, and mean-pooling
-        // then averages the padding in.
-        //
-        // 1.5x is not worth silently corrupting the vectors, and the corruption is invisible: the
-        // output is still 384 dims and still normalised, so nothing downstream would complain. The
-        // round trips were the real cost and batching the REQUEST already removed those.
-        try {
-          for (const t of texts) {
-            const o = await embedB(t.slice(0, 4000), { pooling: 'mean', normalize: true });
-            vectors.push(Array.from(o.data));
-          }
-        } catch (e) {
-          audit('EMBED-FAIL ' + ip + ' n=' + texts.length + ' ' + (Date.now() - tb) + 'ms ' + String(e.message).slice(0, 120));
-          return json(res, 503, { error: 'embedding unavailable', detail: String(e.message).slice(0, 160) });
+        const rawPath = String(req.url || '').split('?')[0];
+        if (req.method === 'GET' && path === '/layers/versions') {
+            const groups = String(url.searchParams.get('groups') || '').split(',').map((g) => g.trim()).filter(Boolean);
+            const release = releaseSummary(RELEASES_DIR);
+            return json(res, 200, { ...layerVersions(LAYERS_DIR, String(url.searchParams.get('machine') || ''), groups), ...(release ? { release } : {}) });
         }
-        audit('EMBED-BATCH ' + ip + ' n=' + texts.length
-          + ' chars=' + texts.reduce((a, t) => a + t.length, 0) + ' ' + (Date.now() - tb) + 'ms');
-        // v rides along so a caller learns the index version without a second request.
-        return json(res, 200, { vectors, v: indexVersion().version });
-      }
-
-      const { text } = parsed;
-      if (typeof text !== 'string' || !text.trim()) return json(res, 400, { error: 'text or texts required' });
-      const t0 = Date.now();
-      const embed = await getEmbedder();
-      let out;
-      try { out = await embed(text.slice(0, 4000), { pooling: 'mean', normalize: true }); }
-      catch (e) {
-        audit('EMBED-FAIL ' + ip + ' chars=' + text.length + ' ' + (Date.now() - t0) + 'ms ' + String(e.message).slice(0, 120));
-        return json(res, 503, { error: 'embedding unavailable', detail: String(e.message).slice(0, 160) });
-      }
-      // Log the CALL, never the text.
-      //
-      // Added 2026-08-22 so a prompt typed on another machine is visible here at all: until now
-      // /embed was the one route that left no trace, which made "is the laptop actually using the
-      // server" unanswerable from this side.
-      //
-      // The text is the owner's actual prompt, so it is never written down. Caller, length and latency
-      // are enough to prove the path works and to spot a machine hammering it, and none of them
-      // reveal what he asked.
-      audit('EMBED ' + ip + ' chars=' + text.length + ' ' + (Date.now() - t0) + 'ms');
-      return json(res, 200, { vector: Array.from(out.data), v: indexVersion().version });
+        if (req.method === 'GET' && rawPath.startsWith('/layers/')) {
+            let key = '';
+            try {
+                key = decodeURIComponent(rawPath.slice('/layers/'.length));
+            }
+            catch {
+                return json(res, 400, { error: 'bad layer key' });
+            }
+            const r = readLayer(LAYERS_DIR, key);
+            if (r.status !== 200)
+                return json(res, r.status, { error: r.error });
+            const etag = '"' + r.version + '"';
+            if (req.headers['if-none-match'] === etag) {
+                res.writeHead(304, { etag });
+                return res.end();
+            }
+            res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', etag });
+            return res.end(r.text);
+        }
+        if (req.method === 'GET' && rawPath.startsWith('/release/')) {
+            const rest = rawPath.slice('/release/'.length);
+            if (rest === 'latest') {
+                const s = releaseSummary(RELEASES_DIR);
+                return s ? json(res, 200, releaseManifest(RELEASES_DIR, s.version)) : json(res, 404, { error: 'no release published' });
+            }
+            const p = releasePath(rest);
+            if (!p)
+                return json(res, 400, { error: 'bad release version' });
+            if (!p.zip) {
+                const man = releaseManifest(RELEASES_DIR, p.version);
+                return man ? json(res, 200, man) : json(res, 404, { error: 'no such release' });
+            }
+            const file = releaseZip(RELEASES_DIR, p.version);
+            if (!file)
+                return json(res, 404, { error: 'no such release' });
+            const buf = readFileSync(file);
+            audit('RELEASE ' + ip + ' ' + caller.name + ' ' + p.version + ' ' + buf.length + 'b');
+            res.writeHead(200, { 'content-type': 'application/zip', 'content-length': buf.length });
+            return res.end(buf);
+        }
+        if (path === '/dist' || path.startsWith('/dist/')) {
+            const allowed = distFiles;
+            const canonical = (buf) => {
+                let n = 0;
+                const o = Buffer.allocUnsafe(buf.length);
+                for (let i = 0; i < buf.length; i += 1) {
+                    if (buf[i] === 13 && buf[i + 1] === 10)
+                        continue;
+                    o[n] = buf[i];
+                    n += 1;
+                }
+                return o.subarray(0, n);
+            };
+            if (path === '/dist/version') {
+                return json(res, 200, distVersion(0));
+            }
+            if (path === '/dist') {
+                const files = [];
+                for (const rel of allowed()) {
+                    try {
+                        const buf = canonical(readFileSync(join(BRAIN, rel)));
+                        files.push({ path: rel, bytes: buf.length, sha: createHash('sha256').update(buf).digest('hex').slice(0, 16) });
+                    }
+                    catch { }
+                }
+                audit('DIST-MANIFEST ' + ip + ' ' + caller.name + ' ' + files.length + ' files');
+                return json(res, 200, { files });
+            }
+            const rel = decodeURIComponent(path.slice('/dist/'.length));
+            if (!allowed().includes(rel)) {
+                audit('DIST-REFUSED ' + ip + ' ' + caller.name + ' ' + rel);
+                return json(res, 403, { error: 'not served', detail: 'only files listed by GET /dist are available' });
+            }
+            const abs = resolve(BRAIN, rel);
+            if (!abs.startsWith(resolve(BRAIN))) {
+                audit('DIST-TRAVERSAL ' + ip + ' ' + caller.name + ' ' + rel);
+                return json(res, 400, { error: 'bad path' });
+            }
+            try {
+                const buf = canonical(readFileSync(abs));
+                audit('DIST ' + ip + ' ' + caller.name + ' ' + rel + ' ' + buf.length + 'b');
+                res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+                return res.end(buf);
+            }
+            catch {
+                return json(res, 404, { error: 'not found on the server' });
+            }
+        }
+        if (path === '/rules') {
+            return json(res, 200, JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')));
+        }
+        if (path === '/index/version') {
+            return json(res, 200, indexVersion());
+        }
+        if (path.startsWith('/index/')) {
+            const name = basename(decodeURIComponent(path.slice('/index/'.length)));
+            const f = join(BRAIN, 'index', name);
+            if (!existsSync(f))
+                return json(res, 404, { error: 'no such index file' });
+            const body = readFileSync(f);
+            res.writeHead(200, {
+                'content-type': name.endsWith('.json') ? 'application/json' : 'text/plain; charset=utf-8',
+                'content-length': body.length,
+                'x-brain-version': indexVersion().version,
+            });
+            return res.end(body);
+        }
+        if (path.startsWith('/memory/') && req.method === 'GET') {
+            const slug = basename(decodeURIComponent(path.slice('/memory/'.length))).replace(/\.md$/, '');
+            const f = join(BRAIN, 'memory', slug + '.md');
+            if (!existsSync(f))
+                return json(res, 404, { error: 'no such memory' });
+            return json(res, 200, { slug, content: readFileSync(f, 'utf8') });
+        }
+        if (path === '/memory' && req.method === 'POST') {
+            let raw = '';
+            for await (const chunk of req) {
+                raw += chunk;
+                if (raw.length > 200000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            let body;
+            try {
+                body = JSON.parse(raw || '{}');
+            }
+            catch {
+                return json(res, 400, { error: 'bad json' });
+            }
+            const slug = String(body.slug || '').trim();
+            const content = String(body.content || '');
+            if (!/^[a-z][a-z0-9_]{2,80}$/.test(slug)) {
+                return json(res, 400, { error: 'bad slug', detail: 'lowercase letters, digits and underscores only, 3 to 81 chars. No dots or slashes.' });
+            }
+            const prefix = slug.split('_')[0];
+            const TYPES = ['user', 'contact', 'project', 'feedback', 'reference'];
+            if (!TYPES.includes(prefix)) {
+                return json(res, 400, { error: 'bad prefix', detail: 'slug must start with one of: ' + TYPES.join(', ') });
+            }
+            if (content.length < 40)
+                return json(res, 400, { error: 'too short', detail: 'a memory needs frontmatter and a body' });
+            const fm = content.replace(/\r\n/g, '\n');
+            if (!fm.startsWith('---'))
+                return json(res, 400, { error: 'no frontmatter' });
+            const end = fm.indexOf('\n---', 3);
+            if (end < 0)
+                return json(res, 400, { error: 'unterminated frontmatter' });
+            const head = fm.slice(3, end);
+            const field = (k) => (head.match(new RegExp('^\\s*' + k + ':\\s*(.+)$', 'm')) || [])[1];
+            const desc = field('description');
+            if (!field('name'))
+                return json(res, 400, { error: 'missing name' });
+            if (!desc || desc.trim().length < 20) {
+                return json(res, 400, { error: 'missing or thin description', detail: 'the description is the only thing indexed for recall. Write it in the words the person would type, at least 20 chars.' });
+            }
+            const topType = (head.match(/^type:[ 	]*(.+)$/m) || [])[1];
+            if (!topType) {
+                return json(res, 400, {
+                    error: 'type must be top level',
+                    detail: 'add a line "type: ' + prefix + '" at the top level of the frontmatter. Nested under metadata does not count: the mind map cannot see it and reflection then blocks commits on every machine.',
+                });
+            }
+            if (topType.trim() !== prefix) {
+                return json(res, 400, { error: 'type mismatch', detail: 'frontmatter type "' + topType.trim() + '" does not match slug prefix "' + prefix + '"' });
+            }
+            const links = [...new Set((fm.match(/\[\[([^\]]+)\]\]/g) || [])
+                    .map((l) => l.slice(2, -2).trim()))];
+            const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+            const resolvable = new Set([norm(slug)]);
+            try {
+                for (const f of readdirSync(join(BRAIN, 'memory'))) {
+                    if (!f.endsWith('.md') || f === 'MEMORY.md')
+                        continue;
+                    resolvable.add(norm(f.slice(0, -3)));
+                    const head = readFileSync(join(BRAIN, 'memory', f), 'utf8').slice(0, 600);
+                    const nm = /^name:\s*(.+)$/m.exec(head);
+                    if (nm)
+                        resolvable.add(norm(nm[1].replace(/["']/g, '')));
+                }
+            }
+            catch { }
+            const ownName = /^name:\s*(.+)$/m.exec(fm);
+            if (ownName)
+                resolvable.add(norm(ownName[1].replace(/["']/g, '')));
+            const dead = links.filter((l) => !resolvable.has(norm(l)));
+            if (dead.length) {
+                return json(res, 400, { error: 'broken wikilink', detail: 'these point at memories that do not exist: '
+                        + dead.join(', ') + '. Create them first, or drop the link. A broken edge blocks commits for every machine.' });
+            }
+            const leaf = /^leaf:\s*true\s*$/m.test(head);
+            if (!links.length && leaf)
+                audit('MEMORY-WRITE-LEAF ' + ip + ' ' + caller.name + ' ' + slug);
+            if (!links.length && !leaf) {
+                const LINK_BAR = 0.45;
+                try {
+                    const emb = JSON.parse(readFileSync(join(BRAIN, 'index', 'embeddings.json'), 'utf8'));
+                    const bodyText = fm.slice(end + 4).replace(/\s+/g, ' ').trim().slice(0, 1200);
+                    const e = await getEmbedder();
+                    const v = (await e(slug.replace(/_/g, ' ') + '. ' + desc + ' ' + bodyText, { pooling: 'mean', normalize: true })).data;
+                    const near = emb.slugs.map((s, i) => { let d = 0; const w = emb.vectors[i]; for (let k = 0; k < w.length; k++)
+                        d += v[k] * w[k]; return [s, d]; })
+                        .filter(([s, d]) => s !== slug && !EPHEMERAL_SLUG.test(s) && d >= LINK_BAR).sort((a, b) => b[1] - a[1]).slice(0, 6);
+                    if (near.length) {
+                        audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' no links, ' + near.length + ' candidates');
+                        return json(res, 400, { error: 'no links', candidates: near.map(([s]) => s),
+                            detail: 'add at least one [[slug]] to a memory this one depends on, changes or is used with. Closest by meaning: '
+                                + near.map(([s, d]) => s + ' (' + d.toFixed(2) + ')').join(', ') + '. Link the one it really relates to, not just the first. If none of them truly relates, add "leaf: true" to the header.' });
+                    }
+                }
+                catch (err) {
+                    audit('LINK-CHECK-SKIPPED ' + slug + ' ' + String(err.message).slice(0, 80));
+                }
+            }
+            const file = join(BRAIN, 'memory', slug + '.md');
+            const existed = existsSync(file);
+            const mAccess = memoryAccess(caller, { method: 'POST', slug, exists: existed, force: false });
+            if (mAccess !== 'allow') {
+                audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + mAccess);
+                return json(res, 403, { error: 'not allowed', detail: mAccess });
+            }
+            try {
+                await saveGate;
+                writeFileSync(file, fm, 'utf8');
+                recordProvenance([{ slug, action: existed ? 'update' : 'new' }], { ...(body.by || {}), machine: caller.name }, 'server');
+                queueBrainSave(slug, existed, caller.name, ip);
+                return json(res, 200, { ok: true, slug, updated: existed, queued: true, pushed: null, v: indexVersion().version });
+            }
+            catch (e) {
+                audit('MEMORY-WRITE-FAIL ' + ip + ' ' + caller.name + ' ' + slug + ' ' + String(e.message).slice(0, 80));
+                return json(res, 500, { error: 'write failed', detail: String(e.message).slice(0, 200) });
+            }
+        }
+        if (path.startsWith('/memory/') && req.method === 'DELETE') {
+            const slug = basename(decodeURIComponent(path.slice('/memory/'.length))).replace(/\.md$/, '');
+            if (!/^[a-z][a-z0-9_]{2,80}$/.test(slug))
+                return json(res, 400, { error: 'bad slug' });
+            const file = join(BRAIN, 'memory', slug + '.md');
+            if (!existsSync(file))
+                return json(res, 404, { error: 'no such memory', detail: slug + ' is not on the server.' });
+            let raw = '';
+            for await (const chunk of req) {
+                raw += chunk;
+                if (raw.length > 20000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            let body = {};
+            try {
+                body = JSON.parse(raw || '{}');
+            }
+            catch { }
+            const dAccess = memoryAccess(caller, { method: 'DELETE', slug, exists: true, force: !!body.force });
+            if (dAccess !== 'allow') {
+                audit('MEMORY-DELETE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + dAccess);
+                return json(res, 403, { error: 'not allowed', detail: dAccess });
+            }
+            const why = String(body.why || '').trim();
+            if (why.length < 10) {
+                return json(res, 400, { error: 'no reason', detail: 'say why in at least ten characters. A deletion with no reason is indistinguishable from an accident.' });
+            }
+            const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+            const ownNames = new Set([norm(slug)]);
+            try {
+                const head = readFileSync(file, 'utf8').slice(0, 600);
+                const nm = /^name:\s*(.+)$/m.exec(head);
+                if (nm)
+                    ownNames.add(norm(nm[1].replace(/["']/g, '')));
+            }
+            catch { }
+            const pointing = [];
+            try {
+                for (const f of readdirSync(join(BRAIN, 'memory'))) {
+                    if (!f.endsWith('.md') || f === 'MEMORY.md' || f === slug + '.md')
+                        continue;
+                    const txt = readFileSync(join(BRAIN, 'memory', f), 'utf8');
+                    const links = [...txt.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => norm(m[1]));
+                    if (links.some((l) => ownNames.has(l)))
+                        pointing.push(f.slice(0, -3));
+                }
+            }
+            catch { }
+            if (pointing.length && !body.force) {
+                return json(res, 409, {
+                    error: 'still linked',
+                    detail: pointing.length + ' memories link to ' + slug + ': ' + pointing.slice(0, 12).join(', ')
+                        + '. A link to a memory that does not exist is a broken edge and it blocks writes for every'
+                        + ' machine. Remove those links first, or repeat with force to have them left as they are.',
+                    linked: pointing,
+                });
+            }
+            try {
+                const grave = join(CONFIG_DIR, 'brain-graveyard');
+                mkdirSync(grave, { recursive: true });
+                const stamp = new Date().toISOString();
+                const note = '<!-- deleted ' + stamp + ' by ' + caller.name + ' from ' + ip + ': ' + why.slice(0, 300) + ' -->\n';
+                const plain = note + readFileSync(file, 'utf8');
+                const reg = JSON.parse(readFileSync(join(BRAIN, 'vault-recipients.json'), 'utf8')) || {};
+                const pub = ((reg.machines || {})[reg.host] || {}).pubkey;
+                if (!pub)
+                    throw new Error('no age recipient for this machine, refusing to delete without a recoverable backup');
+                const sealed = execFileSync('age', ['-r', pub, '-a'], { input: plain, encoding: 'utf8' });
+                writeFileSync(join(grave, slug + '.' + stamp.replace(/[:.]/g, '-') + '.age'), sealed, 'utf8');
+                rmSync(file);
+                audit('MEMORY-DELETE ' + ip + ' ' + caller.name + ' ' + slug + ' :: ' + why.slice(0, 120));
+                recordProvenance([{ slug, action: 'delete' }], { ...(body.by || {}), machine: caller.name }, 'server');
+                queueBrainSave(slug, true, caller.name, ip);
+                return json(res, 200, { ok: true, slug, deleted: true, linked: pointing, queued: true });
+            }
+            catch (e) {
+                audit('MEMORY-DELETE-FAIL ' + ip + ' ' + caller.name + ' ' + slug + ' ' + String(e.message).slice(0, 80));
+                return json(res, 500, { error: 'delete failed', detail: String(e.message).slice(0, 200) });
+            }
+        }
+        if (path === '/search' && req.method === 'POST') {
+            let sbody = '';
+            for await (const chunk of req) {
+                sbody += chunk;
+                if (sbody.length > 100000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            let sp;
+            try {
+                sp = JSON.parse(sbody || '{}');
+            }
+            catch {
+                return json(res, 400, { error: 'bad json' });
+            }
+            const strs = (a, n) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string' && x.trim()).slice(0, n).map((x) => x.slice(0, 1000)) : []);
+            const needs = strs(sp.needs, 20), learned = strs(sp.learned, 10);
+            if (!needs.length && !learned.length)
+                return json(res, 400, { error: 'needs or learned required' });
+            const SEARCH_MIN = 0.5, LEARNED_SHOW = 0.45;
+            const ts = Date.now();
+            const emb = JSON.parse(readFileSync(join(BRAIN, 'index', 'embeddings.json'), 'utf8'));
+            const kwd = JSON.parse(readFileSync(join(BRAIN, 'index', 'keywords.json'), 'utf8'));
+            const e = await getEmbedder();
+            let searchDegraded = '';
+            const vec = async (t) => { try {
+                return (await e(t, { pooling: 'mean', normalize: true })).data;
+            }
+            catch (err) {
+                searchDegraded = String(err.message).slice(0, 160);
+                return null;
+            } };
+            const scores = (v) => (!v ? [] : emb.slugs.map((sl, i) => { let d = 0; const w = emb.vectors[i]; for (let k = 0; k < w.length; k++)
+                d += v[k] * w[k]; return [sl, d]; }));
+            const keep = new Map();
+            for (const n of needs) {
+                const fused = await recall(n, [n], 5, 0, false, 0, -1);
+                if (fused.degraded)
+                    searchDegraded = fused.degraded;
+                for (const h of fused)
+                    if (h.how === 'both')
+                        keep.set(h.slug, { score: 1, how: 'both' });
+                for (const h of fused.filter((x) => x.how !== 'linked').slice(0, 3))
+                    if (!keep.has(h.slug))
+                        keep.set(h.slug, { score: 0.5, how: h.how });
+                for (const [sl, d] of scores(await vec(n)))
+                    if (d >= SEARCH_MIN && (!keep.has(sl) || keep.get(sl).score < d))
+                        keep.set(sl, { score: d, how: keep.get(sl)?.how || 'meaning' });
+            }
+            const memories = [...keep.entries()].sort((a, b) => b[1].score - a[1].score)
+                .map(([sl, v]) => ({ slug: sl, how: v.how, score: +Math.min(v.score, 1).toFixed(3), description: String(kwd.descriptions[sl] || '').slice(0, 160) }));
+            const learnedOut = [];
+            for (const l of learned) {
+                const near = scores(await vec(l)).filter(([, d]) => d >= LEARNED_SHOW).sort((a, b) => b[1] - a[1]).slice(0, 3)
+                    .map(([sl, d]) => ({ slug: sl, score: +d.toFixed(3), description: String(kwd.descriptions[sl] || '').slice(0, 200) }));
+                learnedOut.push({ item: l, closest: near });
+            }
+            audit('SEARCH ' + ip + ' needs=' + needs.length + ' learned=' + learned.length + ' hits=' + memories.length + ' ' + (Date.now() - ts) + 'ms');
+            return json(res, 200, { memories, learned: learnedOut, v: indexVersion().version, ...(searchDegraded ? { note: KEYWORD_ONLY_NOTE + searchDegraded + '.' } : {}) });
+        }
+        if (path === '/recall/turn' && req.method === 'POST') {
+            let tbody = '';
+            for await (const chunk of req) {
+                tbody += chunk;
+                if (tbody.length > 200000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            let tp;
+            try {
+                tp = JSON.parse(tbody || '{}');
+            }
+            catch {
+                return json(res, 400, { error: 'bad json' });
+            }
+            if (typeof tp.prompt !== 'string' || !tp.prompt.trim())
+                return json(res, 400, { error: 'prompt required' });
+            tp.previous = (Array.isArray(tp.previous) ? tp.previous : []).filter((x) => typeof x === 'string').slice(-3).map((x) => x.slice(0, 4000));
+            tp.prompt = tp.prompt.slice(0, 20000);
+            tp.machine = String(tp.machine || '').slice(0, 64);
+            const tt = Date.now();
+            const out = await recallTurn(tp);
+            try {
+                serverAlerts.recall(Date.now() - tt);
+            }
+            catch { }
+            if (out.memories.length) {
+                try {
+                    const PULSE = join(BRAIN, '.recall-pulse.jsonl');
+                    appendFileSync(PULSE, JSON.stringify({ at: Date.now(), host: tp.machine || caller.name, slugs: out.memories.map((m) => m.slug).slice(0, 20), how: out.memories.map((m) => m.why).slice(0, 20) }) + '\n', 'utf8');
+                    const lines = readFileSync(PULSE, 'utf8').split('\n').filter(Boolean);
+                    if (lines.length > 800)
+                        writeFileSync(PULSE, lines.slice(-600).join('\n') + '\n', 'utf8');
+                }
+                catch { }
+            }
+            try {
+                out.distVersion = distVersion().version;
+            }
+            catch { }
+            try {
+                const q = readQuota(BRAIN);
+                if (q && q.at)
+                    out.agyQuotaAt = q.at;
+            }
+            catch { }
+            try {
+                out.decisionsWaiting = decisionsWaiting(BRAIN);
+            }
+            catch { }
+            try {
+                const ds = searchDecisions(BRAIN, tp.prompt, { limit: 3, recall: true });
+                if (ds.length)
+                    out.decisions = ds.map((d) => ({ id: d.id, at: d.at, by: d.by || d.agent, agent: d.agent, area: d.area, what: d.what, state: d.state, ...(d.state === 'reversed' && d.review && d.review.note ? { note: String(d.review.note).slice(0, 300) } : {}) }));
+            }
+            catch { }
+            audit('RECALL-TURN ' + ip + ' ' + caller.name + ' chars=' + tp.prompt.length + ' hits=' + out.memories.length + ' earlier=' + out.memories.filter((m) => m.why === 'earlier').length + ' dropped=' + out.droppedEarlier.length + ' ' + (Date.now() - tt) + 'ms');
+            return json(res, 200, out);
+        }
+        if (path === '/recall' && req.method === 'POST') {
+            let rbody = '';
+            for await (const chunk of req) {
+                rbody += chunk;
+                if (rbody.length > 200000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            let rp;
+            try {
+                rp = JSON.parse(rbody || '{}');
+            }
+            catch {
+                return json(res, 400, { error: 'bad json' });
+            }
+            const prompt = typeof rp.prompt === 'string' ? rp.prompt : '';
+            if (!prompt.trim())
+                return json(res, 400, { error: 'prompt required' });
+            const queries = Array.isArray(rp.queries) && rp.queries.length
+                ? rp.queries.filter((t) => typeof t === 'string' && t.trim()).slice(0, 16)
+                : [prompt.slice(0, 4000)];
+            const tr = Date.now();
+            const bodyChars = rp.bodies === false ? 0
+                : rp.bodies ? Math.min(Math.max(Number(rp.bodyChars) || 1500, 200), 4000) : 0;
+            const ranked = await recall(prompt, queries, Math.min(Math.max(Number(rp.limit) || 5, 1), 20), bodyChars, rp.limit != null, Math.max(0, Math.min(Number(rp.parts) || 0, 16)), (Number.isInteger(rp.contextIndex) && prompt.trim().length >= SHORT_FOLLOW_UP) ? rp.contextIndex : -1);
+            audit('RECALL ' + ip + ' q=' + queries.length + ' chars=' + prompt.length
+                + ' hits=' + ranked.length + (bodyChars ? ' bodies=' + bodyChars : '') + (ranked.degraded ? ' keyword-only' : '') + ' ' + (Date.now() - tr) + 'ms');
+            return json(res, 200, { ranked, v: indexVersion().version, ...(ranked.degraded ? { note: KEYWORD_ONLY_NOTE + ranked.degraded + '.' } : {}) });
+        }
+        if (path === '/decisions' || path === '/decisions/count' || /^\/decisions\/[A-Za-z0-9_-]{1,64}\/review$/.test(path)) {
+            if (await handleDecisionRoute(req, res, { brain: BRAIN, path, url, caller, audit, getToken: () => TOKEN }))
+                return;
+        }
+        if (path === '/pulse' && req.method === 'POST') {
+            let pbody = '';
+            for await (const chunk of req) {
+                pbody += chunk;
+                if (pbody.length > 20000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            let pp;
+            try {
+                pp = JSON.parse(pbody || '{}');
+            }
+            catch {
+                return json(res, 400, { error: 'bad json' });
+            }
+            const host = String(pp.host || '').slice(0, 64);
+            const slugs = Array.isArray(pp.slugs)
+                ? pp.slugs.filter((x) => typeof x === 'string').slice(0, 20).map((x) => x.slice(0, 200))
+                : [];
+            const how = Array.isArray(pp.how)
+                ? pp.how.filter((x) => typeof x === 'string').slice(0, 20)
+                : [];
+            if (!host || !slugs.length)
+                return json(res, 400, { error: 'host and slugs required' });
+            if (host.toUpperCase() === hostname().toUpperCase())
+                return json(res, 200, { ok: true, skipped: 'local' });
+            const at = Number(pp.at) || Date.now();
+            try {
+                const PULSE = join(BRAIN, '.recall-pulse.jsonl');
+                appendFileSync(PULSE, JSON.stringify({ at, host, slugs, how }) + '\n', 'utf8');
+                const lines = readFileSync(PULSE, 'utf8').split('\n').filter(Boolean);
+                if (lines.length > 800)
+                    writeFileSync(PULSE, lines.slice(-600).join('\n') + '\n', 'utf8');
+            }
+            catch { }
+            audit('PULSE ' + ip + ' host=' + host + ' hits=' + slugs.length);
+            return json(res, 200, { ok: true });
+        }
+        if (path === '/embed' && req.method === 'POST') {
+            let body = '';
+            for await (const chunk of req) {
+                body += chunk;
+                if (body.length > 100000) {
+                    req.destroy();
+                    return;
+                }
+            }
+            const parsed = JSON.parse(body || '{}');
+            if (Array.isArray(parsed.texts)) {
+                const texts = parsed.texts.filter((t) => typeof t === 'string' && t.trim()).slice(0, 16);
+                if (!texts.length)
+                    return json(res, 400, { error: 'texts must be a non-empty array of strings' });
+                const tb = Date.now();
+                const embedB = await getEmbedder();
+                const vectors = [];
+                try {
+                    for (const t of texts) {
+                        const o = await embedB(t.slice(0, 4000), { pooling: 'mean', normalize: true });
+                        vectors.push(Array.from(o.data));
+                    }
+                }
+                catch (e) {
+                    audit('EMBED-FAIL ' + ip + ' n=' + texts.length + ' ' + (Date.now() - tb) + 'ms ' + String(e.message).slice(0, 120));
+                    return json(res, 503, { error: 'embedding unavailable', detail: String(e.message).slice(0, 160) });
+                }
+                audit('EMBED-BATCH ' + ip + ' n=' + texts.length
+                    + ' chars=' + texts.reduce((a, t) => a + t.length, 0) + ' ' + (Date.now() - tb) + 'ms');
+                return json(res, 200, { vectors, v: indexVersion().version });
+            }
+            const { text } = parsed;
+            if (typeof text !== 'string' || !text.trim())
+                return json(res, 400, { error: 'text or texts required' });
+            const t0 = Date.now();
+            const embed = await getEmbedder();
+            let out;
+            try {
+                out = await embed(text.slice(0, 4000), { pooling: 'mean', normalize: true });
+            }
+            catch (e) {
+                audit('EMBED-FAIL ' + ip + ' chars=' + text.length + ' ' + (Date.now() - t0) + 'ms ' + String(e.message).slice(0, 120));
+                return json(res, 503, { error: 'embedding unavailable', detail: String(e.message).slice(0, 160) });
+            }
+            audit('EMBED ' + ip + ' chars=' + text.length + ' ' + (Date.now() - t0) + 'ms');
+            return json(res, 200, { vector: Array.from(out.data), v: indexVersion().version });
+        }
+        return json(res, 404, { error: 'no such route' });
     }
-
-    return json(res, 404, { error: 'no such route' });
-  } catch (e) {
-    // Never leak an internal path or a stack trace to a caller that might be hostile.
-    // Log WHO, not just what. An unattributable error is a dead end: the first one of these
-    // came from the locked-down client machine testing /embed with a malformed body, and the line could
-    // not say so, which cost a round trip to establish.
-    audit('ERROR ' + ip + ' ' + path + ' ' + String(e.message).slice(0, 120));
-    return json(res, 500, { error: 'request failed' });
-  }
+    catch (e) {
+        audit('ERROR ' + ip + ' ' + path + ' ' + String(e.message).slice(0, 120));
+        return json(res, 500, { error: 'request failed' });
+    }
 };
-// Anything that throws before the handler's own try (a malformed URL, a bad % in /bootstrap/, a broken token file)
-// rejected this async handler with nothing to catch it, and Node ended the process: one request with no token took the
-// brain down for every machine until the next logon (audit 2026-11-01, tools/brain-server-requests.test.mjs).
 const safeHandler = (req, res) => handler(req, res).catch((e) => {
-  audit('ERROR-EARLY ' + (req.socket.remoteAddress || '?') + ' ' + String(e && e.message).slice(0, 120));
-  try { if (!res.headersSent) json(res, 400, { error: 'bad request' }); else res.end(); } catch { /* socket already gone */ }
+    audit('ERROR-EARLY ' + (req.socket.remoteAddress || '?') + ' ' + String(e && e.message).slice(0, 120));
+    try {
+        if (!res.headersSent)
+            json(res, 400, { error: 'bad request' });
+        else
+            res.end();
+    }
+    catch { }
 });
 const server = createServer(safeHandler);
-
-const host = PUBLIC ? '0.0.0.0' : '127.0.0.1';
-
-// "Already running" is success, not failure. Two things start this: the session-start hook and
-// the Windows scheduled task. Whichever loses the race MUST exit 0, because a nonzero exit makes
-// the task's restart policy fire every minute, forever, against a server that is perfectly
-// healthy. Without this the fix for a dead server becomes a restart loop.
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') {
-    process.stdout.write('brain server already listening on ' + host + ':' + PORT + ', nothing to do' + String.fromCharCode(10));
-    process.exit(0);
-  }
-  throw e;
+const holderAnswers = (url) => new Promise((resolve) => {
+    import(url.startsWith('https') ? 'node:https' : 'node:http').then(({ get }) => {
+        const r = get(url, { rejectUnauthorized: false, timeout: 2000 }, (res) => { res.resume(); resolve(res.statusCode === 200); });
+        r.on('timeout', () => { r.destroy(); resolve(false); });
+        r.on('error', () => resolve(false));
+    }).catch(() => resolve(false));
 });
-// Keep the model's pages resident. Measured 2026-08-22: the process had been up 5.5 hours
-// without restarting, embedFn was still set, and yet a request cost 684ms. The working set had
-// fallen from a 175MB peak to 59MB, so Windows had trimmed the weights out of RAM and the request
-// paid to read them back off disk. Nothing in this file unloads the model; the OS does.
-//
-// Times against the idle gap before the call: back to back 28-58ms, minutes idle 358-376ms,
-// 5.5 hours idle 684ms. Every remote machine pays that on its first prompt after a quiet spell,
-// which is exactly when the owner is most likely to be typing.
-//
-// A tiny embed on a timer touches the weights and keeps them paged in. 45 seconds is a guess at
-// the trimmer's patience, not a measured optimum: short enough to beat the several-minute gaps
-// that already cost 358ms, long enough that the cost is nil. It burns roughly 30ms of one core
-// per interval, about 0.07 percent.
-// THE PUBLISHED CODE FILES (the /dist routes): what a mirroring machine (a laptop client, the laptop) copies with
-// tools/pull-from-server.mjs. Hoisted out of the route so the recall answer can carry the same version.
-function distFiles() {
-    // The plugin manifests and .mcp.json travel too, since 2026-09-07: a mirror-only machine
-    // installs the plugin from its local checkout, and claude plugin update compares versions,
-    // so without these a version bump never reaches the one laptop that cannot use GitHub.
-    const list = ['server-cert.pem', 'server-endpoint.json', 'CLAUDE.md', 'REFLEX.md',
-      'METHODOLOGIES.md', 'GOVERNANCE.md', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', '.mcp.json',
-      // The standing rules every agy sub-agent loads through ~/.gemini/GEMINI.md, on every
-      // machine (2026-09-25). A .md in tools/ fails the extension filter below; a laptop client found it
-      // never arrived. Named one by one so no other markdown in tools/ is published by accident.
-      'tools/subagent-rules.md', 'tools/agent-rules.md',
-      // Read by hooks/check-session-start.mjs (plugin 0.4.55). a mirror-only machine got the new script but not this
-      // file, so its sessions started with Claude's memory off and no memory instructions at all.
-      'hooks/memory-instructions.md',
-      // The Outlook-safe email blocks every agent copies from (2026-10-23).
-      'tools/email-blocks.html'];
-    for (const d of ['tools', 'hooks']) {
-      let names = [];
-      try { names = readdirSync(join(BRAIN, d)); } catch { continue; }
-      for (const n of names) {
-        if (/\.(mjs|json|ps1|cmd)$/.test(n)) list.push(d + '/' + n);
-      }
+const takenOrRetry = async (what, healthUrl, retry, attempt) => {
+    const tail = String.fromCharCode(10);
+    for (let i = 0; i < 3; i++) {
+        if (await holderAnswers(healthUrl)) {
+            process.stdout.write('brain server ' + what + ' already listening and answering, another server serves this machine, exiting' + tail);
+            process.exit(0);
+        }
+        await new Promise((r) => setTimeout(r, 1000));
     }
-    // The mod's shared context layers: global, machine and group layers, which every
-    // agent on every machine reads from layers/ of its brain copy. Markdown, so named by layers-dist.mjs.
+    if (attempt >= 30) {
+        process.stdout.write('brain server ' + what + ': the port stayed taken by something that does not answer /health for 30 tries; exiting 1 so the task retries' + tail);
+        process.exit(1);
+    }
+    process.stdout.write('brain server ' + what + ': the port is held by a copy that does not answer (a restart in progress?); trying again, ' + (attempt + 1) + tail);
+    setTimeout(retry, 1000);
+};
+let plainAttempt = 0;
+const host = PUBLIC ? '0.0.0.0' : '127.0.0.1';
+server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+        takenOrRetry('on ' + host + ':' + PORT, 'http://127.0.0.1:' + PORT + '/health', () => server.listen(PORT, host), plainAttempt++);
+        return;
+    }
+    throw e;
+});
+function distFiles() {
+    const list = ['server-cert.pem', 'server-endpoint.json', 'CLAUDE.md', 'REFLEX.md',
+        'METHODOLOGIES.md', 'GOVERNANCE.md', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', '.mcp.json',
+        'tools/subagent-rules.md', 'tools/agent-rules.md',
+        'hooks/memory-instructions.md',
+        'tools/email-blocks.html',
+        'tools/release-signing-key.pub.pem'];
+    for (const d of ['tools', 'hooks']) {
+        let names = [];
+        try {
+            names = readdirSync(join(BRAIN, d));
+        }
+        catch {
+            continue;
+        }
+        for (const n of names) {
+            if (/\.(mjs|json|ps1|cmd)$/.test(n))
+                list.push(d + '/' + n);
+        }
+    }
     list.push(...servedLayerFiles(BRAIN));
     return list;
-  }
-
-// A stat-only digest of the published files: name, size, mtime. The recall answer carries it (hardening item 3,
-// 2026-11-04), so a mirroring machine's mod pulls when it moves instead of a scheduled task asking every minute.
-// maxAgeMs: a digest younger than this is reused (the recall answer runs on every prompt of every agent).
-let distCache = { at: 0, v: null };
-function distVersion(maxAgeMs = 20_000) {
-  if (distCache.v && maxAgeMs > 0 && Date.now() - distCache.at < maxAgeMs) return distCache.v;
-  const h = createHash('sha256');
-  let n = 0;
-  for (const rel of distFiles().sort()) {
-    try {
-      const st = statSync(join(BRAIN, rel));
-      h.update(rel + ':' + st.size + ':' + Math.floor(st.mtimeMs) + '|');
-      n += 1;
-    } catch { /* absent on this machine, skip */ }
-  }
-  distCache = { at: Date.now(), v: { version: h.digest('hex').slice(0, 16), files: n } };
-  return distCache.v;
 }
-
-// Alerts on the event (hardening item 4): slow recalls and embedder timeouts go to the lead agent as agent messages,
-// when this instance has a messages service (brain.json messagesUrl) and an address to tell (brain.json alertsTo).
-// Neither is set on a stock install, so there the alert is only audited (H5, system review 2026-11-09).
+let distCache = { at: 0, v: null };
+function distVersion(maxAgeMs = 20000) {
+    if (distCache.v && maxAgeMs > 0 && Date.now() - distCache.at < maxAgeMs)
+        return distCache.v;
+    const h = createHash('sha256');
+    let n = 0;
+    for (const rel of distFiles().sort()) {
+        try {
+            const st = statSync(join(BRAIN, rel));
+            h.update(rel + ':' + st.size + ':' + Math.floor(st.mtimeMs) + '|');
+            n += 1;
+        }
+        catch { }
+    }
+    distCache = { at: Date.now(), v: { version: h.digest('hex').slice(0, 16), files: n } };
+    return distCache.v;
+}
 var serverAlerts = makeAlerts({
-  send: (text, key) => {
-    // The address comes from brain.json alertsTo (the lead agent of the install); with none set the alert is only audited, so a
-    // copy of the engine never messages an agent of ours (H5, system review 2026-11-09).
-    let to = '';
-    try { const c = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8')); if (typeof c.alertsTo === 'string' && c.alertsTo) to = c.alertsTo; } catch { /* none */ }
-    if (!to) return { sent: false, why: 'no alert address (brain.json alertsTo)' };
-    return sendSystemMessage({ token: TOKEN, to, text, key, messagesUrl: messagesUrlOf(BRAIN) });
-  },
-  audit: (l) => audit(l),
+    send: (text, key) => {
+        let to = '';
+        try {
+            const c = JSON.parse(readFileSync(join(BRAIN, 'brain.json'), 'utf8'));
+            if (typeof c.alertsTo === 'string' && c.alertsTo)
+                to = c.alertsTo;
+        }
+        catch { }
+        if (!to)
+            return { sent: false, why: 'no alert address (brain.json alertsTo)' };
+        return sendSystemMessage({ token: TOKEN, to, text, key, messagesUrl: messagesUrlOf(BRAIN) });
+    },
+    audit: (l) => audit(l),
 });
-
-const KEEPALIVE_MS = 45_000;
+const KEEPALIVE_MS = 45000;
 const KEEPALIVE_TEXT = 'keepalive';
-
-// A failure is written once, and again only when its reason changes (2026-11-09, a machine without AVX: a CPU without AVX wrote
-// the same line every 45 seconds while recall answered from keywords, as designed).
 let keepaliveFailed = '';
 async function touchModel(label) {
-  try {
-    const e = await getEmbedder();
-    const t = Date.now();
-    await e(KEEPALIVE_TEXT, { pooling: 'mean', normalize: true });
-    if (keepaliveFailed) audit('KEEPALIVE-OK ' + label + ' after: ' + keepaliveFailed);
-    keepaliveFailed = '';
-    return Date.now() - t;
-  } catch (err) {
-    const why = String(err && err.message).slice(0, 80);
-    if (why !== keepaliveFailed) audit('KEEPALIVE-FAIL ' + label + ' ' + why);
-    keepaliveFailed = why;
-    return null;
-  }
-}
-
-if (ALLOW_PLAINTEXT) server.listen(PORT, host, () => {
-  // Who is listening, for the recall hook of an install that runs its own server (brain.json localServer, engine 0.4.90):
-  // it starts one only when this process is gone, instead of trying a start on every prompt.
-  try { writeFileSync(join(BRAIN, '.server-alive.json'), JSON.stringify({ pid: process.pid, port: PORT, at: new Date().toISOString() }) + '\n', 'utf8'); } catch { /* the hook then tries a start, which exits at once */ }
-  process.stdout.write('brain server on ' + host + ':' + PORT
-    + (PUBLIC ? '  PUBLIC, expose only behind a tunnel' : '  local only') + '\n');
-  process.stdout.write('token file: ' + TOKEN_FILE + '\n');
-
-  // Warm on boot so the FIRST real request is not the one that pays the load.
-  touchModel('boot').then((ms) => {
-    if (ms != null) process.stdout.write('embedder warm, ' + ms + 'ms\n');
-  });
-
-  // Not unref'd: keeping the model hot is a job of the server, not a background nicety, and the
-  // server is what holds the process open anyway.
-  setInterval(() => { touchModel('tick'); }, KEEPALIVE_MS);
-});
-
-// The decision review page (tools/decision-review.mjs): plain HTTP on 127.0.0.1 only, its own listener. Who may review
-// is set by brain.json decisionReviewIdentity: "local" (default) needs the per-install review key kept beside this
-// server's token; "tailscale" trusts the login header of tailscale serve. A reversal is sent as an agent message only
-// when a messages service is configured (brain.json messagesUrl). decisionReviewPort 0 or HAVOK_DECISIONS_PORT=0 turns
-// the page off.
-{
-  const decisionsPort = reviewPort(BRAIN);
-  if (decisionsPort > 0) {
-    startReviewListener({ brain: BRAIN, port: decisionsPort, getToken: () => TOKEN, keyFile: reviewKeyFile(CONFIG_DIR), audit, log: (l) => process.stdout.write(l + String.fromCharCode(10)) });
-  }
-}
-
-// ---- TLS ---------------------------------------------------------------------------------
-//
-// The transport was plain HTTP, so every client sent its bearer token across the owner's WiFi in the
-// clear, and that token unlocks the entire vault. Tailscale will encrypt machine to machine, but
-// it needs an elevated install and a browser login only the owner can perform, and the exposure is live
-// right now. This closes it without waiting for anyone, and it is not wasted afterwards: if the
-// tailnet is ever compromised, traffic inside it is still encrypted.
-//
-// PINNED SELF-SIGNED, deliberately not a public CA. Clients accept exactly this certificate and
-// nothing else, which is STRONGER than ordinary PKI here: no certificate authority can be coaxed
-// into issuing a substitute for a name on a private network. The certificate is public and ships
-// in the repo so every machine can pin it. The private key never leaves this machine and is
-// restricted by ACL to <user> and SYSTEM.
-//
-// PLAIN HTTP ON 8478 IS CLOSED: every client talks TLS on 8443. The plain listener starts only when
-// ALLOW_PLAINTEXT is set, as a temporary fallback for a client that cannot yet reach TLS (checked on the host
-// 2026-11-03: nothing listens on 8478).
-// Bind to LOOPBACK and the TAILNET, never 0.0.0.0.
-//
-// The owner, 2026-08-22: make sure nobody else can reach this. 0.0.0.0 put the vault on every network
-// this machine joins, including cafe wifi. Restricting to the Tailscale interface means a
-// compromised phone or IoT device on the house LAN cannot even see the port is open, and a machine
-// away from home still reaches it over the encrypted mesh.
-//
-// TWO listeners rather than one, because Node binds a single address per server and dropping
-// loopback would break THIS machine: its own hook talks to 127.0.0.1 to avoid a 316ms hostname
-// lookup. Binding tailnet-only would have quietly cost every local prompt that time back.
-//
-// 100.64.0.0/10 is the CGNAT range Tailscale assigns. Detected from the interface list rather than
-// by shelling out to tailscale.exe, so a stale PATH cannot break startup.
-function tailnetAddresses() {
-  const out = [];
-  for (const list of Object.values(networkInterfaces() || {})) {
-    for (const a of (list || [])) {
-      if (a.family === 'IPv4' && /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a.address)) out.push(a.address);
+    try {
+        const e = await getEmbedder();
+        const t = Date.now();
+        await e(KEEPALIVE_TEXT, { pooling: 'mean', normalize: true });
+        if (keepaliveFailed)
+            audit('KEEPALIVE-OK ' + label + ' after: ' + keepaliveFailed);
+        keepaliveFailed = '';
+        return Date.now() - t;
     }
-  }
-  return out;
+    catch (err) {
+        const why = String(err && err.message).slice(0, 80);
+        if (why !== keepaliveFailed)
+            audit('KEEPALIVE-FAIL ' + label + ' ' + why);
+        keepaliveFailed = why;
+        return null;
+    }
 }
-
+resumeQueue();
+if (ALLOW_PLAINTEXT)
+    server.listen(PORT, host, () => {
+        try {
+            writeFileSync(join(BRAIN, '.server-alive.json'), JSON.stringify({ pid: process.pid, port: PORT, at: new Date().toISOString() }) + '\n', 'utf8');
+        }
+        catch { }
+        process.stdout.write('brain server on ' + host + ':' + PORT
+            + (PUBLIC ? '  PUBLIC, expose only behind a tunnel' : '  local only') + '\n');
+        process.stdout.write('token file: ' + TOKEN_FILE + '\n');
+        touchModel('boot').then((ms) => {
+            if (ms != null)
+                process.stdout.write('embedder warm, ' + ms + 'ms\n');
+        });
+        setInterval(() => { touchModel('tick'); }, KEEPALIVE_MS);
+    });
+{
+    const decisionsPort = reviewPort(BRAIN);
+    if (decisionsPort > 0) {
+        startReviewListener({ brain: BRAIN, port: decisionsPort, getToken: () => TOKEN, keyFile: reviewKeyFile(CONFIG_DIR), audit, log: (l) => process.stdout.write(l + String.fromCharCode(10)) });
+    }
+}
+function tailnetAddresses() {
+    const out = [];
+    for (const list of Object.values(networkInterfaces() || {})) {
+        for (const a of (list || [])) {
+            if (a.family === 'IPv4' && /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a.address))
+                out.push(a.address);
+        }
+    }
+    return out;
+}
 if (PUBLIC && tailnetAddresses().length === 0) {
-  // --public asked for reachability and there is no tailnet to provide it. Say so loudly rather
-  // than silently serving loopback only, which would look like the server is simply down.
-  process.stdout.write('WARNING: --public but no Tailscale address found yet, serving loopback only until one appears' + String.fromCharCode(10));
+    process.stdout.write('WARNING: --public but no Tailscale address found yet, serving loopback only until one appears' + String.fromCharCode(10));
 }
 const TLS_PORT = Number(process.env.HAVOK_SERVER_TLS_PORT || 8443);
-// How often to look for a tailnet address that was absent at startup. Reading the interfaces once
-// is what left the brain loopback-only for every other machine after the 2026-09-16 reboot.
-// Where tools/install-tailnet-task.ps1 registered the event task HavokTailnetUp (it leaves .tailnet-event in the brain
-// folder), the sweep runs on Windows' network-connected event (POST /tailnet/sweep) and no timer runs (2026-11-05).
-// Anywhere else (an engine install with no such task) the 15-second timer stays. HAVOK_TAILNET_POLL_MS overrides both.
 const TAILNET_POLL_MS = process.env.HAVOK_TAILNET_POLL_MS !== undefined ? Number(process.env.HAVOK_TAILNET_POLL_MS) : existsSync(join(BRAIN, '.tailnet-event')) ? 0 : 15000;
 let tailnetSweep = null;
-
 if (HAVE_TLS) {
-  import('node:https').then(({ createServer: createHttps }) => {
-    const opts = { key: readFileSync(TLS_KEY), cert: readFileSync(TLS_CERT) };
-    // ONE SERVER OBJECT PER ADDRESS.
-    //
-    // A net.Server listens exactly once. Looping tls.listen() over several addresses on a SINGLE
-    // server does not bind them all: the second call fails with ERR_SERVER_ALREADY_LISTEN and the
-    // machine ends up reachable on only one address. Caught 2026-08-23 by checking the listeners
-    // after the change: loopback had silently stopped answering while the tailnet address worked,
-    // so this machine fell back to local matching and nothing anywhere said why.
-    const listenOn = (addr, onFail) => {
-      const tls = createHttps(opts, safeHandler);
-      // Two starters race (scheduled task plus session hook) and the loser must exit quietly,
-      // otherwise its restart policy fires every minute forever against a healthy server.
-      tls.on('error', (e) => {
-        const tail = String.fromCharCode(10);
-        // Loopback taken means another brain server is already serving. Exit: the tailnet watcher's
-        // timer would otherwise keep this copy alive forever. Ten of them had piled up by 2026-09-17,
-        // each started by a session-start check whose 2 second probe hit a server frozen by a write.
-        // The plaintext listener is no reason to stay: a second copy on the same brain folder would also serve and commit.
-        // Only a copy whose TLS port was set on purpose (HAVOK_SERVER_TLS_PORT, a side-by-side install) may differ.
-        if (e && e.code === 'EADDRINUSE' && addr === '127.0.0.1' && (!ALLOW_PLAINTEXT || !process.env.HAVOK_SERVER_TLS_PORT)) { process.stdout.write('brain server TLS already listening on ' + addr + ', another server serves this machine, exiting' + tail); process.exit(0); }
-        if (e && e.code === 'EADDRINUSE') { process.stdout.write('brain server TLS already listening on ' + addr + tail); return; }
-        process.stdout.write('brain server TLS failed on ' + addr + ': ' + String(e && e.message).slice(0, 120) + tail);
-        if (onFail) onFail(addr);
-      });
-      tls.listen(TLS_PORT, addr, () => {
-        process.stdout.write('brain server TLS on ' + addr + ':' + TLS_PORT + String.fromCharCode(10));
-      });
-    };
-    listenOn('127.0.0.1');
-    const tailnet = watchTailnet({
-      list: tailnetAddresses,
-      intervalMs: TAILNET_POLL_MS,
-      bind: (addr) => listenOn(addr, (a) => tailnet.forget(a)),
-    });
-    tailnetSweep = tailnet;
-  }).catch(() => { /* no https available: the plaintext listener still serves */ });
-} else {
-  process.stdout.write('NO TLS CERT, serving plaintext only. Generate one to encrypt the transport.\n');
+    import('node:https').then(({ createServer: createHttps }) => {
+        const opts = { key: readFileSync(TLS_KEY), cert: readFileSync(TLS_CERT) };
+        const listenOn = (addr, onFail) => {
+            const tls = createHttps(opts, safeHandler);
+            let tlsAttempt = 0;
+            tls.on('error', (e) => {
+                const tail = String.fromCharCode(10);
+                if (e && e.code === 'EADDRINUSE' && addr === '127.0.0.1' && (!ALLOW_PLAINTEXT || !process.env.HAVOK_SERVER_TLS_PORT)) {
+                    takenOrRetry('TLS on ' + addr + ':' + TLS_PORT, 'https://127.0.0.1:' + TLS_PORT + '/health', () => tls.listen(TLS_PORT, addr), tlsAttempt++);
+                    return;
+                }
+                if (e && e.code === 'EADDRINUSE') {
+                    process.stdout.write('brain server TLS already listening on ' + addr + tail);
+                    return;
+                }
+                process.stdout.write('brain server TLS failed on ' + addr + ': ' + String(e && e.message).slice(0, 120) + tail);
+                if (onFail)
+                    onFail(addr);
+            });
+            tls.listen(TLS_PORT, addr, () => {
+                process.stdout.write('brain server TLS on ' + addr + ':' + TLS_PORT + String.fromCharCode(10));
+            });
+        };
+        listenOn('127.0.0.1');
+        const tailnet = watchTailnet({
+            list: tailnetAddresses,
+            intervalMs: TAILNET_POLL_MS,
+            bind: (addr) => listenOn(addr, (a) => tailnet.forget(a)),
+        });
+        tailnetSweep = tailnet;
+    }).catch(() => { });
+}
+else {
+    process.stdout.write('NO TLS CERT, serving plaintext only. Generate one to encrypt the transport.\n');
 }

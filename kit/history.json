@@ -60,6 +60,40 @@
     "e635a90a8df71460"
   ],
   "reference_how_to_use_the_git_server.md": [
-    "36a682a768554bbc"
+    "36a682a768554bbc",
+    "6a12478570be4fa9"
+  ],
+  "reference_how_to_clean_up_the_context.md": [
+    "41854efa94146c4a"
+  ],
+  "reference_how_to_make_a_video_presentation.md": [
+    "e4f504dab7db8b4b"
+  ],
+  "reference_how_to_make_voice_audio.md": [
+    "585a795b13b4138f"
+  ],
+  "reference_how_to_message_another_agent.md": [
+    "10133110d8c2d7a1"
+  ],
+  "reference_how_to_use_shared_contexts.md": [
+    "2366e753685819cf"
+  ],
+  "reference_how_to_use_the_brain.md": [
+    "8dad6218bd069d7d"
+  ],
+  "reference_how_to_use_the_vault.md": [
+    "8453e2d3070a17a8"
+  ],
+  "reference_how_to_write_a_context.md": [
+    "4022a626f061e496"
+  ],
+  "reference_how_to_write_a_first_message_to_someone_new.md": [
+    "38ee2e3e1218692a"
+  ],
+  "reference_how_to_write_an_email.md": [
+    "bc51e747b109f55d"
+  ],
+  "reference_how_to_write_chat_messages.md": [
+    "edbc137e57abd739"
   ]
 }

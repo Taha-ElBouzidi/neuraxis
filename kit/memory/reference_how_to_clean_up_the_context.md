@@ -5,9 +5,9 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-11-02
-  updated: 2026-11-02
-  kit_version: 1
-  kit_hash: 41854efa94146c4a
+  updated: 2026-11-10
+  kit_version: 2
+  kit_hash: eb326d1c0f808c6c
 ---
 
 # How to clean up the context
@@ -30,8 +30,8 @@ Each clean-up makes everything after the first archived part be read again once,
 
 1. Save what is lasting first, in memories, files and commits. A clean-up shortens the conversation; it does not replace saving.
 2. Call context_map. Each part shows its kind, size in tokens, age in turns and a label.
-3. Choose what to archive: old tool outputs and finished work whose result is saved. In one long session tool calls and their outputs were about 80 percent of the size. Keep the work in progress and the last report to the owner, where the end state is recorded.
-4. Write one archive per finished topic, with a note you could work from alone: what it was, the outcome, what is still open, and the values that matter (ids, numbers, paths, status codes, the owner's instructions with their dates and the question each answered). The tool adds exact values, errors and a restore pointer, but those are short, so copy into the note any fact that exists only in a raw output. A big archive needs a long note.
+3. Choose what to archive: old tool outputs and finished work whose result is saved. In one long session tool calls and their outputs were about 80 percent of the size. Keep the work in progress and the last report to the person, where the end state is recorded.
+4. Write one archive per finished topic, with a note you could work from alone: what it was, the outcome, what is still open, and the values that matter (ids, numbers, paths, status codes, the person's instructions with their dates and the question each answered). The tool adds exact values, errors and a restore pointer, but those are short, so copy into the note any fact that exists only in a raw output. A big archive needs a long note.
 5. Archive rarely and in one batch: call context_archive once, with every archive as parts (such as `12-20, 25`) and its note. It takes effect when the turn ends. Each batch costs one re-read of everything after its first archived part.
 6. Ask yourself a few questions the work depends on and answer them from the notes. Bring back only what a note cannot answer.
 
@@ -47,7 +47,7 @@ context_restore with an archive id (such as A3) returns the text at the end of t
 
 Use the tool's own compaction (in Claude Code, the compact command) after writing a brief with the file-writing tool, so that its text is in the conversation the summary is made from. Merge into an existing brief; replacing it with only the newest items loses the rest. The brief holds:
 
-- the goal, the owner's instructions and decisions in the owner's words with their dates and the question each answered, and the owner's last five messages word for word
+- the goal, the person's instructions and decisions in the person's words with their dates and the question each answered, and the person's last five messages word for word
 - what is done and where it is saved, what is in progress, failed approaches in one line each, open questions, and every exact path, id, version, amount and measured number with what it measured
 - what can be dropped: raw tool output, file contents, logs and finished reasoning
 

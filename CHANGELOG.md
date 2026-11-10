@@ -2,6 +2,25 @@
 
 Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI assistant.
 
+## 0.4.108
+
+- **A new front page.** What Neuraxis is, how to install it by pasting the link, what you get and what you need,
+  in plain words, with a moving picture of the map and a diagram of how it works.
+- **A cleaner public copy.** The code carries no comments, and the files the assistant reads speak of the person
+  using it. The always-loaded rules (`REFLEX.md`) and the working rules (`METHODOLOGIES.md`) are written as neutral
+  defaults that the person can change in their own context.
+- **The plain-writing rules are your choice.** The hooks that refuse em dashes, emoji, arrows, checkmarks and slang
+  in what the assistant writes are off unless you turn them on: `node tools/writing-style.mjs plain` (or `off`). The
+  install asks you.
+- **Documents in their place.** How it works, the full system, other assistants and the map each have their own
+  page (`docs/HOW_IT_WORKS.md`, `docs/FULL_SYSTEM.md`, `docs/OTHER_ASSISTANTS.md`, `dashboard/README.md`), and the
+  contribution, security and licence agreement files are in `.github/`.
+- **The map works behind a web address with a path.** Served through a site under a path such as `/AI/`, every
+  address it uses is relative, and when a proxy holds its live stream it checks for changes every 30 seconds
+  instead, so "last recall" stays current.
+- **The local server keeps every memory you save.** A memory saved just before the server stopped is committed when
+  it starts again, and a restart no longer leaves the machine without a server.
+
 ## 0.4.107
 
 The product is now called Neuraxis; it was Infinite Context. Your install updates across the rename and keeps your

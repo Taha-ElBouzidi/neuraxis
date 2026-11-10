@@ -567,8 +567,13 @@ async function setAside($: Engine, msgs: Msg[]): Promise<boolean> {
 function sleepOrWake($: Engine, ms: number): Promise<void> {
     return new Promise((resolve) => {
         let done = false;
-        const finish = () => { if (done)
-            return; done = true; wakeUp = null; resolve(); };
+        const finish = () => {
+            if (done)
+                return;
+            done = true;
+            wakeUp = null;
+            resolve();
+        };
         wakeUp = finish;
         $.clock.sleep(ms).then(finish, finish);
     });
@@ -852,8 +857,10 @@ export async function mailStart($: Engine, c: Config) {
     else
         retakeLater($, generation).catch(() => undefined);
     await beat($);
-    beatTimer = $.clock.every(cfg.beatSeconds * 1000, () => { if (!polling)
-        void beat($); });
+    beatTimer = $.clock.every(cfg.beatSeconds * 1000, () => {
+        if (!polling)
+            void beat($);
+    });
     render($);
     loop($, generation).catch(() => undefined);
 }

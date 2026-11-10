@@ -81,7 +81,7 @@ no account. What 0.1 documents.
 
 **Multi-machine mode.** One host runs `tools/brain-server.mjs`; other machines reach it over a
 private network with scoped tokens. Memories live on the host, recall happens on the host, secrets
-are encrypted per machine. Used by the authors across three machines. Not yet documented for
+are encrypted per machine. Not yet documented for
 outside use.
 
 **Scoped token.** In multi-machine mode, a credential that lets a machine recall and write memories

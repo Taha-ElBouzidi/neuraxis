@@ -1,7 +1,7 @@
 # Options, what each one is and what it buys you
 
 Every choice in this project, defined, drawn, and measured where a measurement exists. Numbers
-come from [BENCHMARKS.md](BENCHMARKS.md) and are the authors' own corpus; yours will differ, and
+come from [BENCHMARKS.md](BENCHMARKS.md) and are measured on a test corpus; yours will differ, and
 the tools to measure yours ship with the repository.
 
 ## 1. Where the brain runs: local, or one host for many machines
@@ -17,7 +17,7 @@ the tools to measure yours ship with the repository.
 | **Works offline** | yes | no: no host, no memory, and the agent is told so |
 | **Secrets** | your own files | encrypted per machine; a restricted machine gets memory but never credentials |
 | **Setup cost** | two commands | a private network, a certificate, tokens per machine |
-| **Documented in 0.1** | yes | no, used by the authors, documented later |
+| **Documented in 0.1** | yes | no, documented later |
 
 **Choose local** unless you have more than one machine that needs the same memory. That is the
 only reason multi-machine exists.
@@ -51,7 +51,7 @@ the memory"*: no word in common, found through meaning alone.
 | **Cost as memory grows** | flat | linear |
 | **Risk** | the agent skips a file it should have opened; a rule exists to stop that | the prompt fills with stale text the agent treats as current |
 
-Measured on the authors' brain: 1.7k tokens injected per prompt at 270 memories, and the same at
+Measured on the test brain: 1.7k tokens injected per prompt at 270 memories, and the same at
 5 memories. That flatness is the whole point.
 
 ## 4. Where the rules live: as memories

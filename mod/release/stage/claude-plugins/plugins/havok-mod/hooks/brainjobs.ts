@@ -1,7 +1,7 @@
 import type { Engine } from './shared';
-import { VERSION, S, HOOK_MS, HOOK_MARGIN_MS, subscriptionReserve, owner, homeName } from './shared';
+import { VERSION, S, HOOK_MS, HOOK_MARGIN_MS, subscriptionReserve, owner, homeName, org } from './shared';
 import { markerKey, marked, safeSession, ALIVE_DIR } from './brain/alive-rules.mjs';
-import { contentProblems, contentDenyReason, styleProblems, slipNote } from './brain/content-rules.mjs';
+import { contentProblems, contentDenyReason, styleProblems, slipNote, writingRulesOn } from './brain/content-rules.mjs';
 import { commandProblems, HOW_TO_WRITE } from './brain/commit-message-rules.mjs';
 import { isShell, isCommitAttempt, commitDir, secretsIn, secretDenyReason, SCAN_UNFINISHED, skipsVerify, NO_VERIFY_REASON, tokenFiles, tokensFrom } from './brain/secret-rules.mjs';
 import { COMMIT_CMD, VERIFY_MS, needsVerify, failedReason, HUNG_REASON } from './brain/commitgate-rules.mjs';
@@ -66,12 +66,14 @@ export class BrainTimeout extends Error {
 const META = new Set(['tool', 'tool_use_id', 'agentId', 'requestMeta']);
 const APPEND_JS = "require('fs').appendFileSync(process.argv[1], require('fs').readFileSync(0))";
 const slash = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
-const parse = (s: string): unknown => { try {
-    return JSON.parse(s);
-}
-catch {
-    return null;
-} };
+const parse = (s: string): unknown => {
+    try {
+        return JSON.parse(s);
+    }
+    catch {
+        return null;
+    }
+};
 export const B = {
     ready: null as Promise<void> | null,
     readyDone: false,
@@ -101,6 +103,7 @@ export const B = {
     aliveAt: 0,
 };
 export function brainReset() {
+    writingCache = null;
     Object.assign(B, { ready: null, readyDone: false, home: '', claude: '', root: '', brainDir: '', machine: '', sid: '', marker: null, notes: [], startNote: '', aliveAt: 0, lastTyped: null, answerWith: '', recallOn: false, recallState: freshState(), memState: undefined, gateProbe: null, probeDone: true, probeAt: 0, gateHost: null, ctxTokens: 0, oldHooks: false });
 }
 async function readText($: Engine, path: string): Promise<string> {
@@ -188,10 +191,12 @@ function endJob(job: Job, ending: Ending): never {
     throw new BrainTimeout(job.name, job.ending);
 }
 async function within<T>(job: Job, work: Promise<T>): Promise<T> {
-    const off = onAbort(job.hook?.signal, () => { if (!job.live.signal.aborted) {
-        job.ending = 'signal';
-        job.live.abort();
-    } });
+    const off = onAbort(job.hook?.signal, () => {
+        if (!job.live.signal.aborted) {
+            job.ending = 'signal';
+            job.live.abort();
+        }
+    });
     const ended = new Promise<never>((_, reject) => { onAbort(job.live.signal, () => reject(new BrainTimeout(job.name, job.ending))); });
     ended.catch(() => undefined);
     work.catch(() => undefined);
@@ -258,6 +263,14 @@ async function runScript($: Engine, file: string, args: string[], data: Data, ti
     stillLive(job);
     return $.process.run(['node', `${B.root}/hooks/${file}`, ...args], { stdin: JSON.stringify(data), timeoutMs, env: { CLAUDE_PLUGIN_ROOT: B.root } });
 }
+let writingCache: boolean | null = null;
+async function writingOn($: Engine): Promise<boolean> {
+    if (writingCache !== null)
+        return writingCache;
+    const dir = B.brainDir || B.root;
+    writingCache = org().writingStyle === 'plain' || (dir ? writingRulesOn(parse(await readText($, `${dir}/brain.json`))) : false);
+    return writingCache;
+}
 async function mainSession($: Engine) { return !!B.sid && (await readText($, `${B.claude}/havok-main-session.txt`)).trim() === B.sid; }
 async function gateFile($: Engine) { return slash(String((await $.env.get('HAVOK_GATE_STATE')) || `${B.claude}/havok-brain-gate.json`)); }
 async function gateState($: Engine): Promise<GateState> { return (parse(await readText($, await gateFile($))) as GateState | null) ?? { down: false }; }
@@ -314,8 +327,10 @@ export function heldSince(rows: string, session: string): {
         text?: string;
     } => !!r && r.session === session && typeof r.at === 'number');
     let from = 0;
-    mine.forEach((r, i) => { if (r.kind === 'handled')
-        from = i + 1; });
+    mine.forEach((r, i) => {
+        if (r.kind === 'handled')
+            from = i + 1;
+    });
     return mine.slice(from).filter((r) => r.kind === 'prompt' && typeof r.text === 'string' && r.text.trim()).map((r) => ({ at: r.at, text: r.text! }));
 }
 export function heldNote(held: {
@@ -733,7 +748,7 @@ async function toolJobs($: Engine, job: Job, e: Data): Promise<ToolVerdict> {
         if (r.deny)
             return { deny: r.deny };
     }
-    const content = contentProblems(tool, input);
+    const content = (await writingOn($)) ? contentProblems(tool, input) : null;
     if (content)
         return { deny: contentDenyReason(content) };
     const repo = cmd && isCommitAttempt(cmd) ? commitDir(cmd, await $.session.cwd().catch(() => '')) || undefined : undefined;
@@ -798,6 +813,7 @@ async function promptJobs($: Engine, job: Job, data: Data): Promise<{
         return { context: [] };
     const now = await $.clock.now();
     const prompt = String(data.prompt ?? '');
+    B.answerWith = '';
     const limit = await limitPrompt($, data, now);
     if ('block' in limit)
         return limit;
@@ -865,7 +881,7 @@ async function stopJobs($: Engine, job: Job, data: Data): Promise<string | null>
         return null;
     await disarmBackup($).catch(() => undefined);
     if (data.stop_hook_active !== true) {
-        const reasons = styleProblems(String(data.last_assistant_message ?? ''));
+        const reasons = (await writingOn($)) ? styleProblems(String(data.last_assistant_message ?? '')) : [];
         if (reasons.length)
             B.notes.push(slipNote(reasons));
         const mem = await memDir($);

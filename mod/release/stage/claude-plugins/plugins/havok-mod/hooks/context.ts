@@ -1337,16 +1337,21 @@ export function locate(rows: readonly Row[], f: PendingArchive): number[] | null
     const cands = new Set<number>([0, rows.length - f.rowCount]);
     const anchor = refs.find((r) => !r.fp.startsWith('assistant|||') && !r.fp.startsWith('user|||'));
     if (anchor)
-        fps.forEach((x, k) => { if (x === anchor.fp)
-            cands.add(k - anchor.i); });
+        fps.forEach((x, k) => {
+            if (x === anchor.fp)
+                cands.add(k - anchor.i);
+        });
     for (const d of cands)
         if (tryOffset(d))
             return refs.map((r) => r.i + d);
     const seen = new Map<string, number[]>();
-    fps.forEach((x, k) => { const l = seen.get(x); if (l)
-        l.push(k);
-    else
-        seen.set(x, [k]); });
+    fps.forEach((x, k) => {
+        const l = seen.get(x);
+        if (l)
+            l.push(k);
+        else
+            seen.set(x, [k]);
+    });
     const sorted = [...refs].sort((x, y) => x.i - y.i);
     const once = sorted.find((r) => seen.get(r.fp)?.length === 1);
     if (!once)
@@ -1495,8 +1500,12 @@ function buildCleanup(rows: Row[], a: Analysis, pend: Pending, dropAllThinking: 
         const info = archived.find((x) => x.archive === f)!;
         messages.push(...noteRows(f, info.tokens, noteText(info, a)));
     };
-    const endRun = () => { if (runArch && !runHasNote)
-        putNote(runArch); runArch = ''; runHasNote = false; };
+    const endRun = () => {
+        if (runArch && !runHasNote)
+            putNote(runArch);
+        runArch = '';
+        runHasNote = false;
+    };
     for (let i = 0; i < rows.length; i++) {
         const r = rows[i]!;
         const f = archRows.get(i);
@@ -1724,8 +1733,11 @@ export function boundaryOf(rows: readonly Row[], keys: readonly string[], record
     const inRecord = new Map<string, number>();
     for (const k of recorded)
         inRecord.set(k, (inRecord.get(k) ?? 0) + 1);
-    const past = (b: number, k: string) => { while (b < keys.length && keys[b] === k)
-        b++; return b; };
+    const past = (b: number, k: string) => {
+        while (b < keys.length && keys[b] === k)
+            b++;
+        return b;
+    };
     for (let w = recorded.length - 1; w >= 0; w--) {
         const k = recorded[w]!;
         if (inRecord.get(k) !== 1)
@@ -2211,10 +2223,13 @@ async function toolArchive($: Engine, input: Record<string, unknown>, given?: An
     const cancelled: string[] = [];
     if (cancel.length) {
         const before = await loadPending($);
-        const left = before.archives.filter((f) => { if (cancel.includes(f.archive)) {
-            cancelled.push(f.archive);
-            return false;
-        } return true; });
+        const left = before.archives.filter((f) => {
+            if (cancel.includes(f.archive)) {
+                cancelled.push(f.archive);
+                return false;
+            }
+            return true;
+        });
         if (cancelled.length)
             await savePending($, { archives: left, keeps: before.keeps });
     }

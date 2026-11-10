@@ -175,13 +175,15 @@ const RESERVE_TRAILERS = [RESERVE_TRAILER];
 export const RESERVE_APPROVAL = new RegExp('^(?:' + RESERVE_TRAILERS.join('|') + String.raw `):[ \t]*\d{4}-\d\d-\d\d[ \t]+\S.*$`, 'm');
 export const reserveApproved = (msg) => RESERVE_APPROVAL.test(String(msg || ''));
 const sorted = (v) => (Array.isArray(v) ? v.map(sorted) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v);
-const reserveOfText = (text) => { try {
-    return JSON.stringify(sorted(JSON.parse(text).limitReserve ?? null));
-}
-catch {
-    return 'null';
-} };
+const reserveOfText = (text) => {
+    try {
+        return JSON.stringify(sorted(JSON.parse(text).limitReserve ?? null));
+    }
+    catch {
+        return 'null';
+    }
+};
 export const reserveChanged = (headText, stagedText) => reserveOfText(headText) !== reserveOfText(stagedText);
 export const RESERVE_REFUSAL = 'Commit refused: it changes limitReserve in brain.json, which decides who may use the last '
-    + '5 percent of a Claude subscription. This check stops a mistake; the change needs the owner\'s yes through the main agent. With it,'
+    + '5 percent of a Claude subscription. This check stops a mistake; the change needs the person\'s yes through the main agent. With it,'
     + 'add a line to the message: ' + RESERVE_TRAILER + ': <YYYY-MM-DD> <his words>.';

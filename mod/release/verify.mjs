@@ -94,12 +94,14 @@ ok('the usage row was written', existsSync(`${SCRATCH}/usage`), `${SCRATCH}/usag
 const logs = [inert.debug, active.debug];
 if (mode === 'org') {
     const home = process.env.USERPROFILE ?? '';
-    const json = (f) => { try {
-        return JSON.parse(readFileSync(f, 'utf8'));
-    }
-    catch {
-        return null;
-    } };
+    const json = (f) => {
+        try {
+            return JSON.parse(readFileSync(f, 'utf8'));
+        }
+        catch {
+            return null;
+        }
+    };
     const settings = json(join(home, '.claude', 'settings.json')) ?? {};
     const preTurn = /pre-turn\.mjs/.test(JSON.stringify(settings.hooks?.UserPromptSubmit ?? ''));
     const keepPreTurn = json(join(home, '.claude', 'havok-mod', 'machine.json'))?.keepPreTurn === true;
@@ -119,22 +121,26 @@ if (mode === 'org') {
         ok('the recall call for a recall question reached the brain host', got('recall')?.ok === true, noHost ? 'no layer host' : JSON.stringify(got('recall') ?? 'no recall call'), host);
         const ran = /Hooks: SessionStart:startup \[node "([^"]+dispatch\.mjs)" SessionStart\] \(plugin havok-brain@[^)]*\) finished with status 0/.exec(host.log);
         const sid = (/havok-mod[\\/]+(?:alive|layers-live)[\\/]+([0-9a-f-]{36})/.exec(host.log) ?? [])[1] ?? '';
-        const brainPath = (() => { try {
-            return readFileSync(join(home, '.claude', 'havok-brain-path'), 'utf8').split(/\r?\n/)[0].trim();
-        }
-        catch {
-            return '';
-        } })();
+        const brainPath = (() => {
+            try {
+                return readFileSync(join(home, '.claude', 'havok-brain-path'), 'utf8').split(/\r?\n/)[0].trim();
+            }
+            catch {
+                return '';
+            }
+        })();
         const byMod = !ran && brainPath && existsSync(join(brainPath, 'hooks', 'check-session-start.mjs'));
         const startHook = ran ? ran[1].replace(/dispatch\.mjs$/, 'check-session-start.mjs') : byMod ? join(brainPath, 'hooks', 'check-session-start.mjs') : '';
         const pluginRoot = startHook.replace(/[\\/]hooks[\\/]check-session-start\.mjs$/, '');
-        const brainOut = (s) => { try {
-            return execFileSync('node', [startHook], { cwd: home, input: JSON.stringify({ session_id: s, hook_event_name: 'SessionStart', source: 'startup', cwd: home }), encoding: 'utf8', timeout: 120000, windowsHide: true, env: { ...process.env, CLAUDE_PLUGIN_ROOT: pluginRoot } });
-        }
-        catch (e) {
-            console.log(`INFO the brain's hook failed for ${s}: ${String(e.message).split('\n')[0].slice(0, 200)}`);
-            return '';
-        } };
+        const brainOut = (s) => {
+            try {
+                return execFileSync('node', [startHook], { cwd: home, input: JSON.stringify({ session_id: s, hook_event_name: 'SessionStart', source: 'startup', cwd: home }), encoding: 'utf8', timeout: 120000, windowsHide: true, env: { ...process.env, CLAUDE_PLUGIN_ROOT: pluginRoot } });
+            }
+            catch (e) {
+                console.log(`INFO the brain's hook failed for ${s}: ${String(e.message).split('\n')[0].slice(0, 200)}`);
+                return '';
+            }
+        };
         const REFLEX = /===== BRAIN TIER 0: REFLEX/;
         if ((!ran && !byMod) || (!sid && !byMod)) {
             ok('the brain\'s session start leaves REFLEX out (the layers carry it)', false, (!ran && !byMod) ? 'the brain\'s SessionStart hook did not run with status 0 in this session, and the engine\'s check-session-start.mjs was not found through ~/.claude/havok-brain-path' : 'no session id for the host session in its log');
@@ -142,12 +148,15 @@ if (mode === 'org') {
         else {
             const markerDir = join(home, '.claude', 'havok-mod', 'layers-live');
             const fresh = 'verify-marker-' + Date.now();
-            const settle = (f) => { for (let i = 0; i < 2; i++) {
-                const o = f();
-                if (o.trim())
-                    return o;
-                execFileSync('node', ['-e', 'setTimeout(()=>{},5000)'], { windowsHide: true });
-            } return ''; };
+            const settle = (f) => {
+                for (let i = 0; i < 2; i++) {
+                    const o = f();
+                    if (o.trim())
+                        return o;
+                    execFileSync('node', ['-e', 'setTimeout(()=>{},5000)'], { windowsHide: true });
+                }
+                return '';
+            };
             let withMarker = '';
             try {
                 mkdirSync(markerDir, { recursive: true });
