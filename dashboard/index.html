@@ -7,8 +7,8 @@
 <!-- The topic map. Served by tools/dashboard.mjs, which answers /api/memory, /api/pulse,
      /api/topics, /api/links and /api/events from this brain's own files, and adds the settings of
      dashboard/config.json before the end of the head. -->
-<link rel="icon" type="image/svg+xml" href="/icon.svg">
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#07080A">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -16,10 +16,10 @@
 <style>
 
 @font-face{font-family:"Instrument Serif";font-style:normal;font-weight:400;font-display:swap;
-  src:url(/instrument-serif.woff2) format("woff2");
+  src:url(instrument-serif.woff2) format("woff2");
   unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+2000-206F,U+20AC,U+2122,U+2212,U+FEFF,U+FFFD}
 @font-face{font-family:"Instrument Serif";font-style:normal;font-weight:400;font-display:swap;
-  src:url(/instrument-serif-ext.woff2) format("woff2");
+  src:url(instrument-serif-ext.woff2) format("woff2");
   unicode-range:U+0100-02BA,U+02BD-02C5,U+1E00-1E9F,U+1EF2-1EFF,U+20A0-20AB,U+2C60-2C7F,U+A720-A7FF}
 :root{
   --void:#07080A; --surface:#0D0F12;
@@ -477,7 +477,7 @@ let topicsPromise = null;
 function ensureTopics(){
   if (S.topics) return Promise.resolve(S.topics);
   if (topicsPromise) return topicsPromise;
-  topicsPromise = fetch("/api/topics", {cache:"no-store"})
+  topicsPromise = fetch("api/topics", {cache:"no-store"})
     .then(r => r.ok ? r.json() : { topics:[], byName:{} })
     .catch(() => ({ topics:[], byName:{} }))
     .then(data => {
@@ -740,7 +740,7 @@ function fromLive(g){
 }
 
 Promise.all([
-  fetch("/api/memory", {cache:"no-store"})
+  fetch("api/memory", {cache:"no-store"})
     .then(r => { if (!r.ok) throw new Error("the brain answered " + r.status); return r.json(); }),
   initialGroup === "topic" ? ensureTopics() : Promise.resolve(null),
 ]).then(([live])=>{
@@ -772,8 +772,18 @@ function emptyBrain(){
   box.appendChild(why);
   document.body.appendChild(box);
   setVital("vN", 0); setVital("vE", 0);
-  const es = new EventSource("/api/events");
+  // The first memory redraws the page: from the stream, or by polling when no stream arrives (see startEvents).
+  const es = new EventSource("api/events");
+  let heard = false;
+  es.addEventListener("hello", () => { heard = true; });
   es.addEventListener("graph", () => { es.close(); location.reload(); });
+  const poll = () => {
+    es.close();
+    setInterval(async () => {
+      try { const r = await fetch("api/memory", {cache:"no-store"}); if (r.ok && ((await r.json()).nodes || []).length) location.reload(); } catch { /* next time */ }
+    }, 30000);
+  };
+  setTimeout(() => { if (!heard) poll(); }, 5000);
 }
 
 const THIN = String.fromCharCode(0x2009);
@@ -817,17 +827,34 @@ function init(data){
   startEvents();
 }
 
+// Live updates come from the event stream. Behind a proxy that buffers responses (a site serving the map under a
+// path such as /AI/), the stream never arrives and holds a worker while it waits: when it says nothing within
+// STREAM_WAIT_MS or fails, the page closes it and polls every fetcher, "last recalled" included, every POLL_MS.
+const STREAM_WAIT_MS = 5000, POLL_MS = 30000;
 function startEvents(){
   const fetchers = { pulse: pollPulse, graph: pollGraph, topics: refreshTopics, links: pollLinks };
-  let es = null;
+  let es = null, polling = null, heard = false;
   const all = () => { for (const k in fetchers) fetchers[k](); };
-  const open = () => {
-    if (es || document.hidden) return;
-    es = new EventSource("/api/events");
-    es.addEventListener("hello", all);
-    for (const k in fetchers) es.addEventListener(k, () => fetchers[k]());
+  const poll = () => {
+    if (es) { es.close(); es = null; }
+    if (polling || document.hidden) return;
+    all();
+    polling = setInterval(all, POLL_MS);
   };
-  const close = () => { if (es) { es.close(); es = null; } };
+  const open = () => {
+    if (document.hidden) return;
+    if (S.streamFailed) { poll(); return; }
+    if (es) return;
+    es = new EventSource("api/events");
+    es.addEventListener("hello", () => { heard = true; all(); });
+    for (const k in fetchers) es.addEventListener(k, () => fetchers[k]());
+    es.onerror = () => { if (!heard) { S.streamFailed = true; poll(); } };
+    setTimeout(() => { if (!heard) { S.streamFailed = true; poll(); } }, STREAM_WAIT_MS);
+  };
+  const close = () => {
+    if (es) { es.close(); es = null; }
+    if (polling) { clearInterval(polling); polling = null; }
+  };
   document.addEventListener("visibilitychange", () => { if (document.hidden) close(); else open(); });
   open();
 }
@@ -1011,7 +1038,7 @@ function paintBloom(x,y,radius,color,alpha){
 // Your own shortcuts, from "links" in dashboard/config.json. Nothing is probed; the group is hidden when there are none.
 async function pollLinks(){
   try{
-    const r = await fetch("/api/links", {cache:"no-store"});
+    const r = await fetch("api/links", {cache:"no-store"});
     if(!r.ok) return;
     const { links } = await r.json();
     const list = Array.isArray(links) ? links : [];
@@ -1477,7 +1504,7 @@ function hexa(hex,a){
 
 async function pollPulse(){
   try{
-    const r = await fetch(`/api/pulse?since=${S.lastPulseAt}`, {cache:"no-store"});
+    const r = await fetch(`api/pulse?since=${S.lastPulseAt}`, {cache:"no-store"});
     if(!r.ok){ S.feedOk = false; return; }
     S.feedOk = true;
     const { events } = await r.json();
@@ -1562,7 +1589,7 @@ setInterval(paintRecent, 5000);
 
 async function pollGraph(){
   try{
-    const r = await fetch("/api/memory",{cache:"no-store"});
+    const r = await fetch("api/memory",{cache:"no-store"});
     if(!r.ok) return;
     const g = await r.json();
     const signature = g.signature;

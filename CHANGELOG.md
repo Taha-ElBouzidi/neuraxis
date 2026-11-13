@@ -2,6 +2,26 @@
 
 Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI assistant.
 
+## 0.4.115
+
+- **The 0.4.108 front page is back.** 0.4.114 was published with the older README of 0.4.107 by mistake, without
+  the moving map, the diagram and the plain-words introduction. This release restores them, adds a short part on
+  assistants that talk to each other, and states the Node version messages need (22.13 or newer; the rest runs on
+  Node 18).
+- **The map works behind a web address with a path again**, and the export keeps embedded pictures whole: both fixes
+  of 0.4.108 were missing from 0.4.114.
+- **Publishing checks the front page.** A release that drops an image, a heading or a link from the README stops
+  unless its changelog names each one.
+- **Removed from the front page:** the 0.4.107 sections that 0.4.108 had replaced and 0.4.114 brought back by
+  mistake. Headings: Requirements, Quick start, Let your agent install it for you, The map, Two views of the same
+  memory, Make it yours, On your phone, How it works, Why not a bigger context window, Check it is working, Updates,
+  Read more, Using it with other assistants, Using it with Codex, Multi-machine mode, The decision log, Platform.
+  Images: https://img.shields.io/badge/node-%3E%3D18-6b7280, https://img.shields.io/badge/runs-100%25%20local-6b7280,
+  https://img.shields.io/badge/contributions-CLA%20required-6b7280, docs/recall.svg, docs/dashboard.jpg,
+  docs/dashboard-sphere.jpg, docs/dashboard-constellation.jpg, docs/dashboard-phone.jpg. Links: .project/DECISIONS.md,
+  CLA.md, CONTRIBUTING.md and SECURITY.md (the last three live in .github/). Their content is in docs/ and
+  dashboard/README.md since 0.4.108.
+
 ## 0.4.114
 
 - **Agent messages built in.** Your assistants can send each other requests and answers through a small messages
@@ -21,6 +41,8 @@ Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI a
 
 ## 0.4.108
 
+- **A new front page.** What Neuraxis is, how to install it by pasting the link, what you get and what you need,
+  in plain words, with a moving picture of the map and a diagram of how it works.
 - **A cleaner public copy.** The code carries no comments, and the files the assistant reads speak of the person
   using it. The always-loaded rules (`REFLEX.md`) and the working rules (`METHODOLOGIES.md`) are written as neutral
   defaults that the person can change in their own context.
@@ -30,6 +52,9 @@ Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI a
 - **Documents in their place.** How it works, the full system, other assistants and the map each have their own
   page (`docs/HOW_IT_WORKS.md`, `docs/FULL_SYSTEM.md`, `docs/OTHER_ASSISTANTS.md`, `dashboard/README.md`), and the
   contribution, security and licence agreement files are in `.github/`.
+- **The map works behind a web address with a path.** Served through a site under a path such as `/AI/`, every
+  address it uses is relative, and when a proxy holds its live stream it checks for changes every 30 seconds
+  instead, so "last recall" stays current.
 - **The local server keeps every memory you save.** A memory saved just before the server stopped is committed when
   it starts again, and a restart no longer leaves the machine without a server.
 
