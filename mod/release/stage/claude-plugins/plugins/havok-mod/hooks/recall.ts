@@ -1,18 +1,18 @@
 import type { Engine, HookLink } from './shared';
-import { S, hasIdleMark, setDecisionsWaiting, org, owner, mainAgent } from './shared';
-import { B, brainInit, brainUpAt } from './brainjobs';
+import { S, hasIdleMark, setDecisionsWaiting, org, owner } from './shared';
+import { B, brainInit, brainUpAt, brainKnownDown } from './brainjobs';
 import { isPingText } from './brain/keepwarm-rules.mjs';
 import { type Host, hostRequest, resolveHost } from './brainhost';
 import type { Versions } from './layersource';
 import { usageRow } from './usage';
 import { type Release, parseRelease } from './update';
 import { recordProof } from './hostproof';
-import { sendSystemNote } from './mail';
+import { postOutage } from './mail';
 export const RECALL_BUDGET_MS = 6000;
 export const recallBudget = () => { const v = Number(S.cfg?.checks?.recallBudgetMs); return Number.isFinite(v) && v >= 3000 ? Math.min(v, 30000) : RECALL_BUDGET_MS; };
-const REPORT_FILE = 'havok-recall-down-reported.json';
-const REPORT_AGAIN_MS = 30 * 60000;
 export const REPORT_TO = () => org().reportTo;
+const ALERTS_TO = () => org().alertsTo || org().reportTo;
+const QUEUE_MAX = 50;
 const FAILS_FOR_DOWN = 2;
 const PREVIOUS = 3;
 const DESCRIPTION_CHARS = 60;
@@ -20,7 +20,7 @@ const PROMPT_CHARS = 20000;
 const DOWN_MARK = 'havok-remote-embed-down';
 const RM_JS = "require('fs').rmSync(process.argv[1],{force:true})";
 export const skippedSlow = () => `recall skipped: the brain server did not answer in ${Math.round(recallBudget() / 1000)} s`;
-export const downLine = () => `recall is off: the brain server did not answer twice in a row; ${mainAgent()} was told, and recall resumes on its first healthy answer`;
+export const downLine = () => 'recall is off: the brain server did not answer twice in a row; it switches back on by itself at its first healthy answer';
 export const STILL_DOWN_LINE = 'recall is off: the brain server is still not answering; it resumes on its first healthy answer';
 type Memory = {
     slug: string;
@@ -52,14 +52,14 @@ export type RecallAnswer = {
 let failures = 0;
 let down = false;
 let downSince = 0;
-let reported = false;
 let marked = false;
 let previous: string[] = [];
 let host: Promise<Host | null> | null = null;
 let hostFor = '';
 let shownDecisions = new Set<string>();
 let agySeenAt = '';
-export function recallReset() { agySeenAt = ''; pullAsked = { version: '', at: 0 }; failures = 0; down = false; downSince = 0; reported = false; marked = false; previous = []; host = null; hostFor = ''; shownDecisions = new Set(); }
+export const recallDown = () => down;
+export function recallReset() { agySeenAt = ''; pullAsked = { version: '', at: 0 }; failures = 0; down = false; downSince = 0; marked = false; previous = []; host = null; hostFor = ''; shownDecisions = new Set(); }
 export const recallIsDown = () => down;
 const cut = (s: string, n: number) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length <= n ? x : x.slice(0, n).replace(/\s+\S*$/, '') + '...'; };
 export function formatRecall(a: RecallAnswer, where: {
@@ -119,27 +119,54 @@ function parseAnswer(text: string): RecallAnswer | null {
     const agyAt = Number.isFinite(Date.parse(str(v.agyQuotaAt))) ? str(v.agyQuotaAt) : '';
     return { memories, earlier, note: str(v.note), ...(layers ? { layers } : {}), ...(release ? { release } : {}), ...(waiting !== undefined ? { decisionsWaiting: waiting } : {}), ...(decisions.length ? { decisions } : {}), ...(agyAt ? { agyQuotaAt: agyAt } : {}), ...(dist ? { distVersion: dist } : {}) };
 }
-async function reportDown($: Engine, now: number, why: string) {
-    const agent = S.cfg?.agent ?? '';
-    const machine = (S.cfg?.machine || B.machine || '').toUpperCase();
-    if (!agent || !REPORT_TO() || `${agent}@${machine}` === REPORT_TO() || agent === 'havok')
+type OutageReport = {
+    kind: 'recall';
+    state: 'down' | 'up';
+    at: number;
+    error?: string;
+    to?: string;
+};
+const queuePath = () => `${B.home}/.claude/havok-mod/outage-queue-${(S.cfg?.agent || 'agent').replace(/[^a-z0-9._-]/gi, '')}.json`;
+async function readQueue($: Engine): Promise<OutageReport[]> {
+    try {
+        const q = JSON.parse(await $.fs.read(queuePath())) as OutageReport[];
+        return Array.isArray(q) ? q : [];
+    }
+    catch {
+        return [];
+    }
+}
+let delivering = false;
+async function deliverReports($: Engine) {
+    if (delivering)
         return;
+    delivering = true;
+    try {
+        let q = await readQueue($);
+        if (!q.length)
+            return;
+        let sent = 0;
+        for (const r of q) {
+            if ((await postOutage($, r)) === 'kept')
+                break;
+            sent++;
+        }
+        if (!sent)
+            return;
+        q = (await readQueue($)).slice(sent);
+        await $.fs.write(queuePath(), JSON.stringify(q)).catch(() => undefined);
+        $.ui.log(`outage reports delivered: ${sent}${q.length ? `, ${q.length} still waiting` : ''}`, { to: 'debug' });
+    }
+    finally {
+        delivering = false;
+    }
+}
+async function report($: Engine, state: 'down' | 'up', now: number, error = '') {
     if (!B.brainDir && !B.root)
         return;
-    const path = `${B.home}/.claude/${REPORT_FILE}`;
-    try {
-        const prev = JSON.parse(await $.fs.read(path)) as {
-            at?: number;
-        };
-        if (prev.at && now - prev.at < REPORT_AGAIN_MS)
-            return;
-    }
-    catch { }
-    const sent = await sendSystemNote($, REPORT_TO(), `Recall is down on ${machine} (seen by ${agent}@${machine} at ${new Date(now).toISOString().slice(11, 16)} UTC): the brain server did not answer twice in a row (${why.slice(0, 160)}). Recall is off there and resumes on the first healthy answer of the server.`).catch(() => false);
-    if (!sent)
-        return;
-    await $.fs.write(path, JSON.stringify({ at: now, by: agent })).catch(() => undefined);
-    reported = true;
+    const q = (await readQueue($)).concat([{ kind: 'recall', state, at: now, ...(error ? { error: error.slice(0, 300) } : {}), ...(ALERTS_TO() ? { to: ALERTS_TO() } : {}) }]).slice(-QUEUE_MAX);
+    await $.fs.write(queuePath(), JSON.stringify(q)).catch(() => undefined);
+    void deliverReports($).catch(() => undefined);
 }
 async function recallBack($: Engine, now: number) {
     const since = downSince;
@@ -148,12 +175,7 @@ async function recallBack($: Engine, now: number) {
     failures = 0;
     await markDown($, false);
     $.ui.log(`recall back: the brain server answered /health after ${Math.round((now - since) / 1000)} s`, { to: 'debug' });
-    if (!reported)
-        return;
-    reported = false;
-    const machine = (S.cfg?.machine || B.machine || '').toUpperCase();
-    await $.process.run(['node', '-e', RM_JS, `${B.home}/.claude/${REPORT_FILE}`], { timeoutMs: 10000 }).catch(() => undefined);
-    await sendSystemNote($, REPORT_TO(), `Recall is back on ${machine} at ${new Date(now).toISOString().slice(11, 16)} UTC: the brain server answered after about ${Math.max(1, Math.round((now - since) / 60000))} minutes down. Stop any repair of it you started.`).catch(() => undefined);
+    await report($, 'up', now);
 }
 async function markDown($: Engine, down: boolean) {
     const path = `${B.home}/.claude/${DOWN_MARK}`;
@@ -161,7 +183,7 @@ async function markDown($: Engine, down: boolean) {
         marked = true;
         await $.fs.write(path, new Date(await $.clock.now()).toISOString()).catch(() => undefined);
     }
-    else if (marked) {
+    else if (marked || (await $.fs.exists(path).catch(() => false))) {
         marked = false;
         await $.process.run(['node', '-e', RM_JS, path], { timeoutMs: 10000 }).catch(() => undefined);
     }
@@ -279,12 +301,13 @@ export async function recallTurn($: Engine, prompt: string, hook?: HookLink): Pr
         return { block: '' };
     const now = await $.clock.now();
     if (down) {
-        if (!reported)
-            await reportDown($, now, 'still not answering');
+        void deliverReports($).catch(() => undefined);
         if ((await brainUpAt($)) <= downSince)
             return { block: STILL_DOWN_LINE };
         await recallBack($, now);
     }
+    if (await brainKnownDown($))
+        return { block: STILL_DOWN_LINE };
     const body = {
         prompt: text.slice(0, PROMPT_CHARS),
         previous: previous.slice(-PREVIOUS),
@@ -301,6 +324,7 @@ export async function recallTurn($: Engine, prompt: string, hook?: HookLink): Pr
     if (a) {
         failures = 0;
         await markDown($, false);
+        void deliverReports($).catch(() => undefined);
         if (a.decisionsWaiting !== undefined)
             setDecisionsWaiting($, a.decisionsWaiting);
         if (a.distVersion && h)
@@ -322,7 +346,7 @@ export async function recallTurn($: Engine, prompt: string, hook?: HookLink): Pr
         downSince = now;
         await markDown($, true);
         $.ui.log(`recall off: ${why}; resumes on the first healthy /health answer`, { to: 'debug' });
-        await reportDown($, now, why);
+        await report($, 'down', now, why);
         return { block: downLine() };
     }
     return { block: !r.ok && r.timedOut ? skippedSlow() : `recall skipped: the brain server did not answer (${why.slice(0, 80)})` };

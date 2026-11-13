@@ -32,8 +32,8 @@ to read is missing, say which one.
 | Rules (memories with a `rule:` line) | short rules injected on every turn | `CLAUDE.md` |
 | Plans and limits (`tools/plan.mjs`, `brain.json` "plan") | how much the assistant may spend for the person: helpers, models, background work | step 4.1 below |
 | Kit (`kit/memory`, `kit/files`) | ready methods: documents, decks, research, meetings, debugging, goals and more | each method's first paragraph; `node tools/kit.mjs status` lists them |
-| Helpers, sub-agents, forks, branches | how the assistant delegates, and how the four differ | kit `reference_how_to_brief_sub_agents_and_pick_models` |
-| Other assistants (`tools/setup-agents.mjs`, `tools/setup-codex.mjs`, `tools/recall-mcp.mjs`) | memory and recall for Codex, Gemini CLI, Antigravity, Cursor, Claude Desktop and others | README "Using it with other assistants" |
+| Helpers, sub-agents, agents, branches, forks | how the assistant delegates: branch and fork are the two ways to start one; a helper is hidden, a sub-agent is visible and answers to the agent above it, an agent answers to the person | kit `reference_how_to_brief_sub_agents_and_pick_models` |
+| Other assistants (`tools/setup-agents.mjs`, `tools/setup-codex.mjs`, `tools/recall-mcp.mjs`), agent messages (`tools/setup-messages.mjs`, `messages/`) | memory and recall for Codex, Gemini CLI, Antigravity, Cursor, Claude Desktop and others | README "Using it with other assistants" |
 | The full system for Claude Code on Windows (`tools/setup-full.mjs`) | context layers, context clean-up, keep-warm and the decision log, on top of memory and recall | step 4.4 below |
 | The engine server (`tools/brain-server.mjs`) | runs on this machine only (127.0.0.1): serves the layers and the decision log to the mod | step 4.4 below |
 | The mod (`mod/`) | the part of the full system that lives inside Claude Code; installed by an administrator | `mod/README.md`; step 4.4 below |
@@ -123,6 +123,16 @@ node tools/setup-codex.mjs --check      Codex only, then without --check
 
 Check: each assistant it found is listed with PASS. Codex needs one step from the person: in Codex type `/hooks`,
 trust the hooks, start a new session.
+
+When the person uses more than one assistant, or more than one session at a time, offer agent messages: their
+assistants can then send each other requests and answers (`messages/README.md`). It needs Node 22.13 or later; the
+setup says so and stops on an older Node, and nothing else is affected.
+
+```
+node tools/setup-messages.mjs --check   then without --check
+```
+
+Check: `messages service answers on http://127.0.0.1:8499/health`, and each assistant found lists `+ messages`.
 
 ### 4.3 One memory, not two
 
@@ -214,16 +224,16 @@ do is said plainly, with what the person can do about it.
    said that context layers need the full system.
 7. **Kit.** The kit methods are in place (`node tools/kit.mjs status`); three named to the person, matched to what
    they want help with, each one opened and read whole first (`kit/memory/<name>.md`), never named from the list alone.
-8. **Helpers and agents.** Tell the person these five, in your own words or as written here, then show the plan's rule
+8. **Helpers and agents.** Tell the person these, in your own words or as written here, then show the plan's rule
    set (`node tools/plan.mjs`):
-   - A **sub-agent** (fork helper) is a hidden assistant I start with a written brief for one task; it reports back and
-     ends.
-   - A **branch helper** is a hidden copy of our conversation that does one task; it is the cheaper choice when the
-     material is already in our conversation.
-   - A **branch** is a copy of our conversation that you open and steer yourself, to try another direction.
-   - A **fork** is a new conversation that you open and steer, started with a brief, for a separate task.
-   - A second **agent** is a standing assistant with its own name and context, sharing the same memory; ask me and I
-     set one up (kit `reference_how_to_create_an_agent`).
+   - A **branch** is an exact copy of our conversation; a **fork** is a new conversation with a clean context and a
+     written brief. These are the two ways any assistant below is started.
+   - A **helper** is a hidden assistant I start, as a branch or a fork, for one task; it reports back to me and ends.
+     As a branch it is the cheaper choice when the material is already in our conversation.
+   - A **sub-agent** is a visible assistant with its own name and tab, started as a branch or a fork, that you can see
+     and steer and that answers to me (or to the agent above it): standing for one area, or for one task.
+   - An **agent** is the top of its own tree and answers to you directly; ask me and I set one up (kit
+     `reference_how_to_create_an_agent`).
    When to use which is in kit `reference_how_to_brief_sub_agents_and_pick_models`.
 9. **Clean-up.** With the mod: the context clean-up is on and explained in two sentences. Without it: said that a long
    conversation is handled by the assistant's own compaction.
@@ -231,7 +241,10 @@ do is said plainly, with what the person can do about it.
 11. **The map.** Opened once with `node tools/dashboard.mjs --open` (port 8492, `--port` to change it), if they wanted it.
     The memories are coloured by topic; on a keyword-only install the page says in one line that topics need the
     meaning model, and the person was told the same.
-12. **A first memory.** One fact from this conversation saved as a memory (kit `reference_how_to_save_a_memory`),
+12. **Messages.** If they wanted them: `node tools/setup-messages.mjs` ran, and a test message sent with
+    `send_message` to the assistant's own address arrived (`check_messages`). If not: said in one line that they can
+    turn them on later.
+13. **A first memory.** One fact from this conversation saved as a memory (kit `reference_how_to_save_a_memory`),
     `node tools/build-index.mjs` run, and recalled in a new session.
 
 Then give the person `docs/TUTORIAL.md`'s first two things to try.

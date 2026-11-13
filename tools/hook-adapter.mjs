@@ -63,17 +63,24 @@ function lastUserRequest(transcriptPath) {
 }
 let out = {};
 try {
+    const messages = async (session, kind = 'gemini') => { try {
+        const { turnBlock } = await import('../hooks/messages-client.mjs');
+        return await turnBlock({ kind, session, cwd: process.cwd() });
+    }
+    catch {
+        return '';
+    } };
     if (MODE === 'gemini') {
-        const ctx = recall(input.prompt, { session_id: input.session_id });
+        const ctx = [recall(input.prompt, { session_id: input.session_id }), await messages(input.session_id || '')].filter(Boolean).join(String.fromCharCode(10, 10));
         out = ctx ? { hookSpecificOutput: { additionalContext: ctx } } : {};
     }
     else if (MODE === 'agy') {
         const u = lastUserRequest(input.transcriptPath);
-        const ctx = u.latest ? recall(u.text, { session_id: input.conversationId, ...(u.context ? { context: u.context } : {}) }) : '';
+        const ctx = u.latest ? [recall(u.text, { session_id: input.conversationId, ...(u.context ? { context: u.context } : {}) }), await messages(input.conversationId || '')].filter(Boolean).join(String.fromCharCode(10, 10)) : '';
         out = ctx ? { injectSteps: [{ ephemeralMessage: ctx }] } : {};
     }
     else if (MODE === 'cursor') {
-        out = { additional_context: rulesAndInstruction() };
+        out = { additional_context: [rulesAndInstruction(), await messages(input.session_id || input.conversation_id || '', 'cursor')].filter(Boolean).join(String.fromCharCode(10, 10)) };
     }
     else if (MODE === 'cline') {
         const ctx = recall(input.prompt || (input.userPromptSubmit && input.userPromptSubmit.prompt), {});

@@ -2992,10 +2992,10 @@ export async function contextCompose($: Engine, e: PromptComposeInput, next: (e:
     const mine = inForce.filter((l) => l.text.trim()).map((l) => ({ id: l.id, text: sectionText(l), scope: 'session' as const }));
     return { sections: [...base, ...mine] };
 }
-export async function contextLayerCheck($: Engine, versions?: Versions) {
+export async function contextLayerCheck($: Engine, versions?: Versions, offline = false) {
     if (!cfg || S.turnRunning)
         return;
-    if (source)
+    if (source && (versions || !offline))
         await checkLayerVersions($, source, versions);
     {
         await refreshLayers($);

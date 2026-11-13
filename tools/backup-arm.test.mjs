@@ -57,21 +57,16 @@ test('a settings.json that does not parse is left untouched', () => {
 });
 const start = (h, extra = {}) => spawnSync(process.execPath, [DISPATCH, 'SessionStart'], {
     input: JSON.stringify({ hook_event_name: 'SessionStart', session_id: 's1', source: 'resume' }), encoding: 'utf8', windowsHide: true, timeout: 60000,
-    env: { ...process.env, USERPROFILE: h, HOME: h, HAVOK_DISPATCH_HOOKS: mkdtempSync(join(tmpdir(), 'nohooks-')), ...extra },
+    env: { ...process.env, USERPROFILE: h, HOME: h, HAVOK_DISPATCH_HOOKS: mkdtempSync(join(tmpdir(), 'nohooks-')), HAVOK_DISPATCH_START_WAIT_MS: '0', ...extra },
 });
-test('a session start the mod did not handle arms that session; one it handled arms nothing', () => {
+test('with the mod installed, a session start arms nothing and removes a block an older version left', () => {
     const h = home({ settings: {} });
-    start(h);
-    assert.deepEqual(armedSessions(h).map((x) => x.sid), ['s1']);
+    arm(h, 'old-session', 'armed by an older version');
+    recompute(h, DISPATCH);
     assert.equal(ourGroups(settingsOf(h)).length, 4);
-    const h2 = home({ settings: {} });
-    const dir = join(h2, ...ALIVE_DIR.split('/'));
-    mkdirSync(dir, { recursive: true });
-    const data = { hook_event_name: 'SessionStart', session_id: 's1', source: 'resume' };
-    writeFileSync(join(dir, 's1.json'), JSON.stringify(marked(null, '0.1.31', 'SessionStart', markerKey('SessionStart', data), Date.now())));
-    start(h2);
-    assert.deepEqual(armedSessions(h2), []);
-    assert.equal(existsSync(join(h2, '.claude', 'settings.json')) ? ourGroups(settingsOf(h2)).length : 0, 0);
+    start(h);
+    assert.deepEqual(armedSessions(h), []);
+    assert.equal(ourGroups(settingsOf(h)).length, 0);
 });
 test('a machine without the mod is armed for good', () => {
     const h = home({ mod: false, settings: {} });

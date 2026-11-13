@@ -122,6 +122,7 @@ export function merge(event, results) {
     return r && !r.over && r.out.trim() ? r.out : null;
 }
 export const BACKUP_NOTE_DIR = 'backup';
+export const START_WAIT_MS = Number(process.env.HAVOK_DISPATCH_START_WAIT_MS) >= 0 && process.env.HAVOK_DISPATCH_START_WAIT_MS !== undefined ? Number(process.env.HAVOK_DISPATCH_START_WAIT_MS) : 10000;
 function noteBackup(home, sid, note) {
     try {
         const dir = join(home, '.claude', 'havok-mod', BACKUP_NOTE_DIR);
@@ -162,17 +163,46 @@ async function main() {
         catch {
             return '';
         } })());
-    const now = Date.now();
+    let now = Date.now();
     if (handled(marker, event, data, now))
         process.exit(0);
+    if (event === 'SessionStart' && sid && existsSync(join(home, '.claude', 'havok-mod'))) {
+        const until = Date.now() + START_WAIT_MS;
+        while (Date.now() < until) {
+            await new Promise((r) => setTimeout(r, 250));
+            marker = parse((() => { try {
+                return readFileSync(join(home, ...ALIVE_DIR.split('/'), sid + '.json'), 'utf8');
+            }
+            catch {
+                return '';
+            } })());
+            if (handled(marker, event, data, Date.now()))
+                process.exit(0);
+        }
+        now = Date.now();
+    }
+    if (existsSync(join(home, '.claude', 'havok-mod'))) {
+        if (event === 'SessionStart' && sid) {
+            try {
+                const { report } = await import('./mod-failure.mjs');
+                const { cause, why } = whyNotHandled(marker, event, now);
+                report(home, { session: sid, source: 'sessionstart', cause, why: 'The mod did not handle the session start (' + String(data.source || '') + '): ' + why + '.', agent: process.env.HAVOK_MOD_AGENT || '', mod: (marker && marker.v) || '' });
+            }
+            catch { }
+        }
+        try {
+            const { disarmAll, recompute } = await import('../tools/backup-arm.mjs');
+            disarmAll(home);
+            recompute(home, fileURLToPath(import.meta.url));
+        }
+        catch { }
+        process.exit(0);
+    }
     if (event === 'SessionStart') {
         try {
             const { arm, recompute, PERMANENT } = await import('../tools/backup-arm.mjs');
             const self = fileURLToPath(import.meta.url);
-            if (!existsSync(join(home, '.claude', 'havok-mod')))
-                arm(home, PERMANENT, 'no mod on this machine');
-            else if (sid)
-                arm(home, sid, 'the mod did not handle the session start (' + String(data.source || '') + ')');
+            arm(home, PERMANENT, 'no mod on this machine');
             recompute(home, self);
         }
         catch { }

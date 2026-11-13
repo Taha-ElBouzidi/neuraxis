@@ -220,9 +220,9 @@ function icon(cfg) {
 }
 function manifest(cfg) {
     return {
-        name: cfg.name, short_name: cfg.name, description: 'The map of your memories.', start_url: './', scope: './',
+        name: cfg.name, short_name: cfg.name, description: 'The map of your memories.', start_url: '/', scope: '/',
         display: 'standalone', background_color: cfg.colors.void || '#07080A', theme_color: cfg.colors.void || '#07080A',
-        icons: [{ src: 'icon.svg', sizes: 'any', type: 'image/svg+xml' }],
+        icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml' }],
     };
 }
 export function createMapServer({ brain = ENGINE, web = WEB } = {}) {

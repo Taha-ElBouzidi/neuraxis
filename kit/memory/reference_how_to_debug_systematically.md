@@ -5,9 +5,9 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-09-26
-  updated: 2026-09-26
-  kit_version: 1
-  kit_hash: f6da1c32c2ba0604
+  updated: 2026-11-13
+  kit_version: 2
+  kit_hash: 4ac0b312d4587eb0
 ---
 
 # How to debug systematically
@@ -53,6 +53,10 @@ If a fix does not work, that gets counted. Under three failed attempts, the righ
 ## If the process genuinely finds no root cause
 
 Occasionally, a full investigation shows the issue really is environmental, timing dependent, or external. That is only a legitimate conclusion once the process above has actually been completed: what was investigated gets documented, an appropriate handling gets implemented such as a retry, a timeout, or a clear error message, and monitoring gets added for the future. Most claims of "no root cause" turn out, on inspection, to be an incomplete investigation rather than a genuinely rootless bug.
+
+## A hang with no error: a helper that opens its own connection
+
+Never call a helper that opens its own database connection or transaction while the caller still holds an uncommitted lock on a row that helper will touch. The helper waits for the lock, the caller waits for the helper, and nothing ever commits: an application-level hang that the database cannot detect as a deadlock, and that a test suite shows only as silence. Do the locking write in its own short transaction, close it so it commits, and only then call the self-connecting helper. The same care applies to notifications and web calls made inside an open transaction. When a run hangs without an error, look first for a call that waits on something the caller itself still holds.
 
 ## Further techniques
 

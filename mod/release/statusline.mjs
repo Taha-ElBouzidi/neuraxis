@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, statSync, writeFileSync, mkdirSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join, dirname, basename, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -79,6 +79,37 @@ if (cwd) {
     parts.push(`${c.cyan}${basename(cwd) || cwd}${c.reset}${branch ? ` ${c.white}${branch}${c.reset}` : ""}`);
 }
 let mod = null, modOff = false;
+function lastTurnAt(path) {
+    try {
+        const fd = openSync(path, "r");
+        try {
+            const size = fstatSync(fd).size;
+            const len = Math.min(size, 128 * 1024);
+            const buf = Buffer.alloc(len);
+            readSync(fd, buf, 0, len, size - len);
+            const lines = buf.toString("utf8").split("\n");
+            for (let i = lines.length - 1; i >= 0; i--) {
+                let o;
+                try {
+                    o = JSON.parse(lines[i]);
+                }
+                catch {
+                    continue;
+                }
+                if (!o || o.isSidechain || (o.type !== "user" && o.type !== "assistant"))
+                    continue;
+                const t = Date.parse(o.timestamp);
+                if (!isNaN(t))
+                    return t;
+            }
+        }
+        finally {
+            closeSync(fd);
+        }
+    }
+    catch { }
+    return 0;
+}
 {
     const sid = String(d.session_id || "");
     try {
@@ -86,12 +117,7 @@ let mod = null, modOff = false;
             const f = join(process.env.USERPROFILE || process.env.HOME || homedir(), ".claude", "havok-mod", "status", sid + ".json");
             if (existsSync(f)) {
                 mod = JSON.parse(readFileSync(f, "utf8"));
-                let wrote = 0;
-                try {
-                    if (d.transcript_path)
-                        wrote = statSync(d.transcript_path).mtimeMs;
-                }
-                catch { }
+                const wrote = d.transcript_path ? lastTurnAt(d.transcript_path) : 0;
                 modOff = wrote - Date.parse(mod.at) > 2 * 60 * 1000;
             }
             else {
@@ -102,9 +128,9 @@ let mod = null, modOff = false;
                 }
                 catch { }
                 if (machine && typeof machine === "object" && !Array.isArray(machine) && machine.keepPreTurn !== true && d.transcript_path && existsSync(d.transcript_path)) {
-                    const wrote = statSync(d.transcript_path).mtimeMs;
+                    const wrote = lastTurnAt(d.transcript_path);
                     const alive = join(home, ".claude", "havok-mod", "alive", sid + ".json");
-                    modOff = !existsSync(alive) || wrote - statSync(alive).mtimeMs > 2 * 60 * 1000;
+                    modOff = wrote > 0 && (!existsSync(alive) || wrote - statSync(alive).mtimeMs > 2 * 60 * 1000);
                 }
             }
         }
@@ -126,40 +152,39 @@ let mod = null, modOff = false;
             parts.splice(modelAt, 0, text);
     }
 }
-let backupArmed = false;
 {
     const sid = String(d.session_id || "");
     const userHome = process.env.USERPROFILE || process.env.HOME || homedir();
     if (/^[A-Za-z0-9_-]{6,80}$/.test(sid)) {
-        const f = join(userHome, ".claude", "havok-backup-armed", sid + ".json");
+        const f = join(userHome, ".claude", "havok-mod", "mod-off", sid + ".json");
         let cur = null;
         try {
             cur = JSON.parse(readFileSync(f, "utf8"));
         }
         catch { }
         const now = Date.now();
-        const firstLook = !!(modOff && !(cur && cur.armed === true) && !(cur && Number(cur.suspect) > 0 && now - Number(cur.suspect) >= 30000));
-        if (firstLook && !(cur && Number(cur.suspect) > 0)) {
+        if (!modOff) {
+            if (cur && !cur.reported) {
+                try {
+                    writeFileSync(f, JSON.stringify({ clear: true, at: new Date(now).toISOString() }));
+                }
+                catch { }
+            }
+        }
+        else if (!(cur && Number(cur.suspect) > 0)) {
             try {
                 mkdirSync(dirname(f), { recursive: true });
-                writeFileSync(f, JSON.stringify({ armed: false, suspect: now, at: new Date(now).toISOString() }));
-                cur = { armed: false, suspect: now };
+                writeFileSync(f, JSON.stringify({ suspect: now, at: new Date(now).toISOString() }));
             }
             catch { }
-        }
-        else if (!modOff && cur && Number(cur.suspect) > 0 && cur.armed !== true) {
-            try {
-                writeFileSync(f, JSON.stringify({ armed: false, at: new Date(now).toISOString() }));
-            }
-            catch { }
-        }
-        if (firstLook)
             modOff = false;
-        else if (modOff && !(cur && cur.armed === true)) {
+        }
+        else if (now - Number(cur.suspect) < 30000) {
+            modOff = false;
+        }
+        else if (!cur.reported) {
             try {
-                mkdirSync(dirname(f), { recursive: true });
-                writeFileSync(f, JSON.stringify({ armed: true, why: "status line: havok-mod off in this session", at: new Date().toISOString() }));
-                cur = { armed: true };
+                writeFileSync(f, JSON.stringify({ ...cur, reported: now }));
                 let plugin = "";
                 try {
                     plugin = String((JSON.parse(readFileSync(join(userHome, ".claude", "plugins", "installed_plugins.json"), "utf8"))?.plugins?.["havok-brain@havok-brain"] || []).find((x) => x && x.installPath)?.installPath || "");
@@ -170,13 +195,13 @@ let backupArmed = false;
                     brain = readFileSync(join(userHome, ".claude", "havok-brain-path"), "utf8").split(/\r?\n/)[0].trim();
                 }
                 catch { }
-                const tool = [plugin, brain].filter(Boolean).map((p) => join(p, "tools", "backup-arm.mjs")).find((t) => existsSync(t));
+                const tool = [plugin, brain].filter(Boolean).map((p) => join(p, "hooks", "mod-failure.mjs")).find((t) => existsSync(t));
+                const agent = String(process.env.HAVOK_MOD_AGENT || "");
                 if (tool)
-                    spawn(process.execPath, [tool, "recompute"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+                    spawn(process.execPath, [tool, "report", sid, "statusline", "mod-off", "The mod stopped writing its status in a running session (havok-mod off for over 30 s)."], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, HAVOK_MOD_AGENT: agent } }).unref();
             }
             catch { }
         }
-        backupArmed = !!(cur && cur.armed === true);
     }
 }
 {
@@ -195,9 +220,8 @@ const firstLineParts = parts.length;
     try {
         if (existsSync(mark)) {
             const t = statSync(mark).mtimeMs;
-            seg = Date.now() - t < 10 * 60 * 1000
-                ? `${c.dim}brain${c.reset} ${c.red}offline since ${hhmm(new Date(t))}${c.reset}`
-                : `${c.dim}brain${c.reset} ${c.yellow}retrying (failed ${hhmm(new Date(t))})${c.reset}`;
+            if (Date.now() - t < 10 * 60 * 1000)
+                seg = `${c.dim}brain${c.reset} ${c.red}offline since ${hhmm(new Date(t))}${c.reset}`;
         }
     }
     catch { }
@@ -269,8 +293,6 @@ if (mod) {
 }
 else if (modOff)
     parts.push(`${c.red}havok-mod off${c.reset}`);
-if (backupArmed)
-    parts.push(`${c.red}backup armed${c.reset}`);
 {
     const sid = String(d.session_id || "");
     try {

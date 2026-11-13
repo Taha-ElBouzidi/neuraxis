@@ -5,9 +5,9 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-11-02
-  updated: 2026-11-10
-  kit_version: 2
-  kit_hash: ed3e2cc78b9660f0
+  updated: 2026-11-13
+  kit_version: 3
+  kit_hash: a610bfef4bdc969c
 ---
 
 # How to write or reply to an email
@@ -25,10 +25,10 @@ An email is read later, searched, quoted and forwarded, so it must make sense on
 1. **Recall the person's format** for this kind of reader. If none is saved, ask the person once and save the answer ([[reference_how_to_save_a_memory]]). If earlier emails from the person to this reader exist, read two or three and match that tone: too direct and too friendly are both wrong.
 2. **Settle the purpose:** one thing the email must achieve; the rest waits for the answer. If the person already wrote to this reader on this topic, say when and recap in one line.
 3. **Write the subject** (nine words or fewer) **and the body:** one sentence of context, then the facts. Ask only what is needed, in a sentence of its own, never a list; an email that only informs ends after its facts. Use only facts the person gave or memory records, and mark any gap instead of guessing. Write in the reader's language unless the person's format says otherwise, with its accents. Writing up to a senior person, give context before the ask.
-4. **On a reply,** keep the thread's subject, answer the latest message, put the new text above the quoted history, and keep everyone in To and Cc except the person, unless told otherwise.
+4. **On a reply,** keep the thread's subject, answer the latest message, put the new text above the quoted history, and keep everyone in To and Cc except the person, unless told otherwise. A good reply comes from the whole thread, not the last message: find the thread with the person's mail tools (whatever is connected: an MCP server, a mail client, a browser), read every message in it, and note what is asked, the tone in use, any deadline and any attachment mentioned. Check the person's calendar for a related meeting or deadline, and whether the person has replied to this sender before. Answer every question in the original, never leave an ask unaddressed, and propose concrete next steps where they apply. If the reply needs information that is not available, ask before drafting. Never add Cc or Bcc recipients unless told to.
 5. **Check the draft.** Save it as plain text with a "Subject:" line and run `node tools/email-check.mjs draft.txt` (add `--first` for a first contact). It fails: over 125 words on a first contact (200 otherwise), more than two questions on a first contact, any list line, a sentence over 30 words, common AI phrases, a long subject, signs of price shopping, French without accents. Fix each failure, then read the draft as the recipient. The checker tests form only: a draft can pass and still miss the person's format.
 6. **Read it back as it will arrive:** recipients, subject, body, signature, attachments. A reply can carry images from the original's signature as attachments nobody chose. View formatting rendered: mail programs often drop paragraph spacing.
-7. **Show the draft and send only on an explicit yes** ([[feedback_reversible_act_irreversible_ask]]). If the person cuts or rewrites it, save what changed and why, so the next draft starts closer.
+7. **Show the draft with its context** (who it replies to, the subject, a one-line summary of the thread) **and send only on an explicit yes** ([[feedback_reversible_act_irreversible_ask]]). Offer three choices: save it as a draft in the mail tool (attached to the original thread, then confirm it is there), change it, or scrap it. If the person cuts or rewrites it, save what changed and why, so the next draft starts closer.
 
 ## Mistakes to avoid, and what to do instead
 

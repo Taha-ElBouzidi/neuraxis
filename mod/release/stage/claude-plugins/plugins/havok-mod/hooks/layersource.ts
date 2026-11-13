@@ -1,5 +1,6 @@
 import type { Engine } from './shared';
 import { type Host, hostRequest } from './brainhost';
+import { brainKnownDown } from './brainjobs';
 import { type Release, parseRelease } from './update';
 export type Versions = Record<string, string>;
 export type SourceLayer = {
@@ -53,6 +54,8 @@ async function hostVersions($: Engine, c: LayerSourceCfg): Promise<{
 } | {
     why: string;
 }> {
+    if (await brainKnownDown($).catch(() => false))
+        return { why: 'the brain server is known to be down on this machine' };
     if (!c.host)
         return { why: 'no layer host known on this machine (no brain checkout and no context.layerHost)' };
     const q = `/layers/versions?machine=${encodeURIComponent(c.machine)}${c.groups.length ? `&groups=${c.groups.map(encodeURIComponent).join(',')}` : ''}`;

@@ -10,7 +10,7 @@ import { JOBS } from '../hooks/dispatch.mjs';
 const HOOKS = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks');
 const DISPATCH = join(HOOKS, 'dispatch.mjs');
 const EM = String.fromCharCode(0x2014);
-function home({ mod = true } = {}) {
+function home({ mod = false } = {}) {
     const root = mkdtempSync(join(tmpdir(), 'dispatch-'));
     mkdirSync(join(root, '.claude'));
     if (mod)
@@ -77,33 +77,9 @@ test('the mod handled this very tool call: the dispatcher runs nothing and says 
         rmSync(fake.dir, { recursive: true, force: true });
     }
 });
-test('the mod handled another tool call, not this one: the old hooks run and refuse the em dash, and the fallback is logged', () => {
-    const root = home();
-    try {
-        mark(root, 's1', 'PreToolUse', { ...bashEm, tool_use_id: 'toolu_other' });
-        const r = run(root, 'PreToolUse', bashEm);
-        assert.equal(r.out?.hookSpecificOutput?.permissionDecision, 'deny');
-        assert.match(r.out.hookSpecificOutput.permissionDecisionReason, /em dash/);
-        assert.match(backupLog(root), /PreToolUse .*s1/);
-    }
-    finally {
-        rmSync(root, { recursive: true, force: true });
-    }
-});
 test('no marker at all (mod missing, crashed or skipped): the old hooks run', () => {
     const root = home();
     try {
-        const r = run(root, 'PreToolUse', bashEm);
-        assert.equal(r.out?.hookSpecificOutput?.permissionDecision, 'deny');
-    }
-    finally {
-        rmSync(root, { recursive: true, force: true });
-    }
-});
-test('a marker older than a minute does not count', () => {
-    const root = home();
-    try {
-        mark(root, 's1', 'PreToolUse', bashEm, Date.now() - 2 * 60000);
         const r = run(root, 'PreToolUse', bashEm);
         assert.equal(r.out?.hookSpecificOutput?.permissionDecision, 'deny');
     }
@@ -196,17 +172,14 @@ test('the limit check that does not finish blocks the prompt (it is a safety che
         rmSync(fake.dir, { recursive: true, force: true });
     }
 });
-test('the mod handled this Stop: nothing runs; a Stop it did not handle runs the stop hooks and keeps a block', () => {
+test('a Stop runs the stop hooks and keeps their block', () => {
     const root = home();
     const fake = fakeHooks({ 'brain-gate.mjs': { print: { decision: 'block', reason: 'brain down' } } });
     try {
         const s = { hook_event_name: 'Stop', session_id: 's1', prompt_id: 'p1', stop_hook_active: false, last_assistant_message: 'done' };
-        mark(root, 's1', 'Stop', s);
-        assert.equal(run(root, 'Stop', s, { HAVOK_DISPATCH_HOOKS: fake.dir }).out, null);
-        assert.deepEqual(fake.ran(), []);
-        const r = run(root, 'Stop', { ...s, last_assistant_message: 'other reply' }, { HAVOK_DISPATCH_HOOKS: fake.dir });
-        assert.deepEqual(r.out, { decision: 'block', reason: 'brain down' });
-        assert.deepEqual(fake.ran().sort(), ['brain-gate.mjs', 'check-memory-written.mjs', 'check-stop.mjs', 'recall-gate.mjs']);
+        const r = run(root, 'Stop', s, { HAVOK_DISPATCH_HOOKS: fake.dir });
+        assert.equal(r.out?.decision, 'block');
+        assert.ok(fake.ran().includes('brain-gate.mjs'));
     }
     finally {
         rmSync(root, { recursive: true, force: true });
@@ -272,17 +245,60 @@ test('the backup never blocks a keep-warm ping: an old timer is told to delete i
         rmSync(root, { recursive: true, force: true });
     }
 });
-test('a backup run leaves a per-session note with its reason for the status line; a handled event leaves none', () => {
+test('a session start with an old marker waits for the mod: marked during the wait, nothing runs and no note is left', async () => {
     const root = home();
-    run(root, 'PreToolUse', bashEm);
-    const f = join(root, '.claude', 'havok-mod', 'backup', 's1.json');
-    assert.ok(existsSync(f));
-    const note = JSON.parse(readFileSync(f, 'utf8'));
-    assert.equal(note.event, 'PreToolUse');
-    assert.equal(note.cause, 'no-marker');
-    assert.match(note.why, /no mod marker/);
-    const root2 = home();
-    mark(root2, 's1', 'PreToolUse', bashEm);
-    run(root2, 'PreToolUse', bashEm);
-    assert.equal(existsSync(join(root2, '.claude', 'havok-mod', 'backup', 's1.json')), false);
+    const input = { hook_event_name: 'SessionStart', session_id: 's9', source: 'resume' };
+    mark(root, 's9', 'UserPromptSubmit', { prompt: 'old', prompt_id: 'p' }, Date.now() - 20 * 60000);
+    const { spawn } = await import('node:child_process');
+    const fake = fakeHooks({});
+    const child = spawn(process.execPath, [DISPATCH, 'SessionStart'], { windowsHide: true, env: { ...process.env, USERPROFILE: root, HOME: root, CLAUDE_PLUGIN_ROOT: '', HAVOK_DISPATCH_HOOKS: fake.dir, HAVOK_DISPATCH_START_WAIT_MS: '4000' } });
+    child.stdin.end(JSON.stringify(input));
+    await new Promise((r) => setTimeout(r, 1200));
+    mark(root, 's9', 'SessionStart', input);
+    const code = await new Promise((r) => child.on('exit', r));
+    assert.equal(code, 0);
+    assert.deepEqual(fake.ran(), []);
+    assert.equal(existsSync(join(root, '.claude', 'havok-mod', 'backup', 's9.json')), false);
+    rmSync(root, { recursive: true, force: true });
+});
+const failures = (root) => { const f = join(root, '.claude', 'havok-mod', 'mod-failures.jsonl'); return existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []; };
+test('with the mod installed, an event the mod did not handle runs no old hook and refuses nothing', () => {
+    const root = home({ mod: true });
+    const fake = fakeHooks({});
+    const r = run(root, 'PreToolUse', bashEm, { HAVOK_DISPATCH_HOOKS: fake.dir });
+    assert.equal(r.status, 0);
+    assert.equal(r.out, null);
+    assert.deepEqual(fake.ran(), []);
+    assert.equal(backupLog(root), '');
+    rmSync(root, { recursive: true, force: true });
+});
+test('with the mod installed, a session start the mod never marks is reported once after the wait, and nothing runs', () => {
+    const root = home({ mod: true });
+    const input = { hook_event_name: 'SessionStart', session_id: 's8', source: 'resume' };
+    mark(root, 's8', 'UserPromptSubmit', { prompt: 'old', prompt_id: 'p' }, Date.now() - 20 * 60000);
+    const fake = fakeHooks({});
+    const env = { HAVOK_DISPATCH_HOOKS: fake.dir, HAVOK_DISPATCH_START_WAIT_MS: '1500', HAVOK_MOD_AGENT: 'dev-2' };
+    const r = run(root, 'SessionStart', input, env);
+    assert.equal(r.status, 0);
+    assert.ok(r.ms >= 1500, 'waited ' + r.ms + ' ms');
+    assert.deepEqual(fake.ran(), []);
+    const rows = failures(root);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].session, 's8');
+    assert.equal(rows[0].agent, 'dev-2');
+    assert.equal(rows[0].cause, 'stale-marker');
+    assert.equal(rows[0].sent, false);
+    assert.match(rows[0].why, /did not handle the session start \(resume\)/);
+    run(root, 'SessionStart', input, env);
+    assert.equal(failures(root).length, 1);
+    rmSync(root, { recursive: true, force: true });
+});
+test('with the mod installed, a session start the mod marks is not reported', async () => {
+    const root = home({ mod: true });
+    const input = { hook_event_name: 'SessionStart', session_id: 's7', source: 'startup' };
+    mark(root, 's7', 'SessionStart', input);
+    const r = run(root, 'SessionStart', input, { HAVOK_DISPATCH_START_WAIT_MS: '500' });
+    assert.equal(r.status, 0);
+    assert.deepEqual(failures(root), []);
+    rmSync(root, { recursive: true, force: true });
 });

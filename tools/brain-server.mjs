@@ -6,7 +6,7 @@ import { homedir, networkInterfaces, hostname } from 'node:os';
 import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { execFileSync, execFile, spawn } from 'node:child_process';
 import { withBrainLock } from './brain-git-lock.mjs';
-import { vaultAccess, mayReplace, ownEntries, memoryAccess } from './vault-access.mjs';
+import { vaultAccess, mayReplace, ownEntries, memoryAccess, readList, listFor } from './vault-access.mjs';
 import { makeRecall, SHORT_FOLLOW_UP } from './recall-core.mjs';
 import { watchTailnet } from './tailnet-watch.mjs';
 import { servedLayerFiles } from './layers-dist.mjs';
@@ -72,7 +72,7 @@ function authOf(header) {
         found = { name: 'SERVER', scope: 'full' };
     for (const [tok, meta] of Object.entries(EXTRA_TOKENS_NOW())) {
         if (constEq(given, tok))
-            found = { name: meta.name || 'unnamed', scope: meta.scope || 'recall', store: meta.store === true, ...(meta.memoryWrites ? { memoryWrites: String(meta.memoryWrites) } : {}) };
+            found = { name: meta.name || 'unnamed', scope: meta.scope || 'recall', store: meta.store === true, read: readList(meta), ...(meta.memoryWrites ? { memoryWrites: String(meta.memoryWrites) } : {}) };
     }
     return found;
 }
@@ -376,8 +376,8 @@ const handler = async (req, res) => {
             const v = JSON.parse(readFileSync(join(BRAIN, 'vault.json'), 'utf8'));
             let out = Object.entries(v.secrets || {}).map(([name, s]) => ({ name, updated: s.updated, note: s.note || '' }));
             if (vAccess === 'own-list')
-                out = ownEntries(out, caller.name);
-            audit('list ' + ip + (vAccess === 'own-list' ? ' ' + caller.name + ' own only' : ''));
+                out = listFor(out, caller);
+            audit('list ' + ip + (vAccess === 'own-list' ? ' ' + caller.name + ' own and granted only' : ''));
             return json(res, 200, { secrets: out });
         }
         if (path.startsWith('/vault/get/')) {
@@ -396,7 +396,7 @@ const handler = async (req, res) => {
                         + ' and NOT the server being broken. Run: node tools/brain-client.mjs list',
                 });
             }
-            audit('READ SECRET ' + name + ' by ' + ip);
+            audit('READ SECRET ' + name + ' by ' + (caller ? caller.name + ' ' : '') + ip + (caller && caller.scope !== 'full' ? ' (granted)' : ''));
             return json(res, 200, { name, value });
         }
         if (path.startsWith('/vault/set/') && req.method === 'POST') {

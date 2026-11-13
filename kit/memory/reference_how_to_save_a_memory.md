@@ -5,9 +5,9 @@ type: reference
 metadata:
   type: reference
   asserted: 2026-09-26
-  updated: 2026-09-26
-  kit_version: 1
-  kit_hash: 988a996baf394aa8
+  updated: 2026-11-13
+  kit_version: 2
+  kit_hash: 6af3f63db83bf52d
 ---
 
 # How to save a memory
@@ -22,6 +22,7 @@ Memory lives in the brain folder, one memory per Markdown file, one file holding
 - Dates matter: when a memory is first written down, and again whenever it changes.
 - Before writing, check whether the fact is already there. If it is, that existing memory gets updated; a fact never gets a second, competing memory.
 - Every memory links to at least one other memory it depends on, changes, or is normally used alongside, and only for a real relation, not a token link to satisfy a rule.
+- A new measurement that contradicts a stored fact is a second data point, not automatically a correction. Before replacing, check that both share the same scope: filter, column, period, status and units. If they differ, the memory is not wrong but narrow: keep both readings, name the scope of each, and say what the difference means. State the scope in the same sentence as every number, because a paragraph is read on its own.
 - When a fact changes, the old memory is replaced rather than left standing next to a new, contradicting one. Two memories that disagree mean one of them is quietly wrong and nobody notices until it causes a real mistake.
 - What does not belong in memory: a narrative of the session, anything a codebase or its history already records on its own, a temporary status that will be stale by next week, and never a password, key, or token.
 

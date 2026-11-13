@@ -61,8 +61,34 @@ else if (cmd === 'list') {
     }
     console.log('SERVER'.padEnd(16) + 'full'.padEnd(10) + '(the built-in token, not listed in this file)');
     for (const m of rows.sort((a, b) => String(a.name).localeCompare(b.name))) {
-        console.log(String(m.name).padEnd(16) + String(m.scope).padEnd(10) + 'issued ' + String(m.issued).slice(0, 10));
+        console.log(String(m.name).padEnd(16) + String(m.scope).padEnd(10) + 'issued ' + String(m.issued).slice(0, 10) + (Array.isArray(m.read) && m.read.length ? '  reads: ' + m.read.join(', ') : ''));
     }
+}
+else if (cmd === 'grant' || cmd === 'ungrant') {
+    const secret = String(process.argv[4] || '');
+    if (!name || !/^[A-Za-z0-9_.-]+$/.test(secret)) {
+        console.log('usage: node tools/token.mjs ' + cmd + ' <NAME> <secret name>  (an exact name, no wildcard)');
+        process.exit(1);
+    }
+    const db = load();
+    let n = 0;
+    for (const meta of Object.values(db)) {
+        if (meta.name !== name)
+            continue;
+        const list = new Set(Array.isArray(meta.read) ? meta.read : []);
+        if (cmd === 'grant')
+            list.add(secret);
+        else
+            list.delete(secret);
+        meta.read = [...list];
+        n++;
+    }
+    if (!n) {
+        console.log('no token found for ' + name);
+        process.exit(1);
+    }
+    save(db);
+    console.log((cmd === 'grant' ? 'granted ' : 'took back ') + secret + (cmd === 'grant' ? ' to ' : ' from ') + name + ' (' + n + ' token(s)); it may now read: ' + (Object.values(db).find((m) => m.name === name).read.join(', ') || 'nothing'));
 }
 else if (cmd === 'revoke') {
     if (!name) {

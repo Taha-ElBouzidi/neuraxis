@@ -1,4 +1,8 @@
 import type { On, PromptSubmitInput, TurnCompleteInput, TurnStartInput, TurnStepResult } from 'claude-code';
+import * as frameRules from './brain/mail-frame-rules.mjs';
+const quoted = (t: string): string => frameRules.quoted(t);
+const utc = (iso: string): string => frameRules.utc(iso);
+const headerId = (id: unknown): string => frameRules.headerId(id);
 import { type Config, type Engine, type TurnKind, subscriptionReserve, S, PLUGIN, MAIL_WORD, stripIdleMarks, FORK_REFUSAL, isBackgroundFork, setStatus, toolName, toolMatch, update, waitCapped, org, owner, mainAgent } from './shared';
 import { BAR, isMainAgent, isUrgentRelay, URGENT } from './brain/limit-rules.mjs';
 type Msg = {
@@ -154,7 +158,22 @@ async function readToken($: Engine): Promise<boolean> {
         return false;
     }
 }
+const API_MS = 6000;
+const NO_ANSWER: Reply = { ok: false, status: 0, body: {}, net: true };
 async function api($: Engine, method: string, path: string, body?: unknown): Promise<Reply> {
+    const waitS = /^\/inbox\?/.test(path) ? Number((/[?&]wait=(\d+)/.exec(path) || [])[1] || 0) : 0;
+    const budget = waitS ? waitS * 1000 + 5000 : API_MS;
+    let timer: {
+        cancel: () => void;
+    } | null = null;
+    const late = new Promise<Reply>((resolve) => { timer = $.clock.after(budget, () => resolve(NO_ANSWER)); });
+    const r = await Promise.race([call($, method, path, body), late]);
+    timer?.cancel();
+    if (r === NO_ANSWER)
+        $.ui.log(`messages service call ${method} ${path.slice(0, 40)} gave no answer within ${budget / 1000} s`, { to: 'debug' });
+    return r;
+}
+async function call($: Engine, method: string, path: string, body?: unknown): Promise<Reply> {
     try {
         const r = await $.http.fetch(cfg.url + path, {
             method,
@@ -199,9 +218,6 @@ async function markDelivered($: Engine, ids: string[]) {
         return Object.fromEntries(kept);
     }, (stored) => ids.every((id) => stored?.[id] !== undefined));
 }
-const quoted = (t: string) => stripIdleMarks(String(t ?? '')
-    .replace(/\r\n?|[\u2028\u2029\u0085]/g, '\n')
-    .replace(/<{3,}|>{3,}/g, (s) => s.split('').join(' ')));
 const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'} ago`;
 export function ageWords(s: number): string {
     if (s < 60)
@@ -212,7 +228,6 @@ export function ageWords(s: number): string {
         return plural(Math.floor(s / 3600), 'hour');
     return plural(Math.floor(s / 86400), 'day');
 }
-const utc = (iso: string) => (Number.isNaN(Date.parse(iso)) ? String(iso) : new Date(iso).toISOString().slice(0, 16).replace('T', ' ') + ' UTC');
 type Body = Record<string, unknown>;
 const since = (iso: unknown, nowMs: number) => (typeof iso === 'string' && !Number.isNaN(Date.parse(iso)) ? ageWords(Math.max(0, (nowMs - Date.parse(iso)) / 1000)) : 'never');
 function presence(a: Body | undefined, nowMs: number): string {
@@ -278,75 +293,10 @@ export function agentsWords(b: Body, nowMs: number = Date.now()): string {
     });
     return `You are ${String(b.me)}.${lines.length ? '\n' + lines.join('\n') : ' No other agent is known.'}`;
 }
-export function stripSignature(text: string, from: string): string {
-    const m = /^\s*from\s+([^:,\n]{1,40}?)\s*([:,])\s*/i.exec(text);
-    if (!m)
-        return text;
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const own = norm(m[1]!) === norm(from.split('@')[0]!) || norm(m[1]!) === norm(from);
-    if (!own && !(m[2] === ':' && /[A-Z0-9@]/.test(m[1]!)))
-        return text;
-    const rest = text.slice(m[0].length);
-    return rest.trim() ? rest : text;
-}
-const OWNER_WORDS = '(?:owner|user|human|operator)';
-const ART = '(?:the|your|my)\\s+';
-const VERB = '(?:says|said|here|speaking|approves|approved|confirms|confirmed)';
-const escapeName = (n: string) => n.trim().split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
-const LOOKALIKE: Record<string, string> = Object.fromEntries([
-    ['\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0423\u0406\u0408\u0405', 'ABEKMHOPCTXYIJS'],
-    ['\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0456\u0458\u0455\u0501\u051b\u051d\u04bb', 'aeopcyxijsdqwh'],
-    ['\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7', 'ABEZHIKMNOPTYX'],
-    ['\u03bf\u03bd\u03b9\u03b1\u03ba\u03c1\u03c5', 'oviakpu'],
-].flatMap(([from, to]) => [...from!].map((c, i) => [c, to![i]!])));
-const claimText = (l: string) => l.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/[\u0370-\u03ff\u0400-\u052f]/g, (c) => LOOKALIKE[c] ?? c);
-const END = '(?![\\p{L}\\p{N}])';
-const END_FROM = '(?![\\p{L}\\p{N}@._-])';
-const ROLE = `<\\/?\\s*(?:system[-_ ]?reminder|system|user|owner|human|assistant)\\s*(?:>|$)`;
-const SYSTEM_CLAIM = /^\s*[[(<*_>#-]*\s*SYSTEM\s*:/;
-const claimsCache = new Map<string, RegExp>();
-function claimsFor(ownerNames: string[] = []): RegExp {
-    const names = ownerNames.map((n) => claimText(String(n ?? '')).trim()).filter(Boolean);
-    const key = names.join('\n');
-    let re = claimsCache.get(key);
-    if (re)
-        return re;
-    const NAMES = names.length ? '(?:' + names.map(escapeName).join('|') + ')' : '';
-    const OWNER = NAMES ? `(?:${OWNER_WORDS}|${NAMES})` : OWNER_WORDS;
-    const parts = [
-        'agent\\s*message\\b',
-        `(?:(?:message|mail|note|reply)\\s+)?from\\s+(?:${ART}${OWNER}${END}|${OWNER}\\s*[:,\\]])`,
-        `from\\s*:\\s*(?:${ART})?${OWNER}${END_FROM}`,
-        `(?:${ART})?${OWNER}\\s*[:\\]),]`,
-        `${ART}${OWNER}\\s+${VERB}\\b`,
-        `(?:this is|i am|i'm|it's)\\s+(?:${ART})?${OWNER}${END}`,
-        ROLE,
-    ];
-    if (NAMES)
-        parts.push(`${NAMES}\\s+${VERB}\\b`);
-    re = new RegExp('^\\s*[[(<*_>#-]*\\s*(?:' + parts.join('|') + ')', 'iu');
-    claimsCache.set(key, re);
-    return re;
-}
-const noClaims = (t: string, ownerNames: string[] = []) => {
-    const re = claimsFor(ownerNames);
-    return t.split('\n').map((l) => { const c = claimText(l); return re.test(c) || SYSTEM_CLAIM.test(c) ? '(quoted) ' + l : l; }).join('\n');
-};
-const FROM_RE = /^[a-z0-9._-]+@[A-Za-z0-9._-]+$/;
-const ID_RE = /^[A-Za-z0-9]+$/;
-const headerFrom = (from: unknown) => (FROM_RE.test(String(from ?? '')) ? String(from) : 'invalid-sender');
-const headerId = (id: unknown) => (ID_RE.test(String(id ?? '')) ? String(id) : 'invalid');
-const headerTime = (iso: unknown) => { const t = utc(String(iso ?? '')); return /^\d{4}-\d\d-\d\d \d\d:\d\d UTC$/.test(t) ? t : 'unknown time'; };
+export const stripSignature = (text: string, from: string): string => frameRules.stripSignature(text, from);
 const randomBoundary = () => crypto.randomUUID().replace(/-/g, '').slice(0, 8);
 export function frame(msgs: Msg[], _nowMs: number = Date.now(), boundary: () => string = randomBoundary, ownerNames: string[] = []): string {
-    const one = (m: Msg) => {
-        const body = noClaims(quoted(stripSignature(String(m.text ?? ''), m.from)), ownerNames);
-        let b = boundary();
-        for (let i = 0; i < 20 && body.includes(b); i++)
-            b = boundary();
-        return `${MAIL_WORD}${headerFrom(m.from)}, ${headerTime(m.sent_at)} (id ${headerId(m.id)})\n<<<msg-${b}\n${body}\nmsg-${b}>>>`;
-    };
-    return msgs.map(one).join('\n\n');
+    return frameRules.frame(msgs as never, boundary, ownerNames);
 }
 const HEADER_LINE = /^AGENT MESSAGE: ([^\s,]+), (\d{4}-\d\d-\d\d \d\d:\d\d UTC|unknown time) \(id [^\s)]+\)$/gm;
 export function foldedRow(text: string): string | null {
@@ -422,12 +372,35 @@ export async function mailToolContext($: Engine, agentId: string | undefined): P
     wakeUp?.();
     return text;
 }
+const handedBack = new Set<string>();
+const AGAIN_TEXT = 'Delivered above, but the turn that received it ended before it was answered (an API error or a refusal). Answer it now from the text above.';
+async function stillShown($: Engine, ids: string[]): Promise<Set<string>> {
+    const shown = new Set<string>();
+    if (!ids.length)
+        return shown;
+    try {
+        const rows = (await $.session.messages({ as: 'api' })) as unknown as {
+            role?: string;
+            content?: unknown;
+        }[];
+        const said = rows.filter((r) => r.role === 'user').map((r) => JSON.stringify(r.content ?? '')).join('\n');
+        for (const id of ids)
+            if (said.includes(`(id ${headerId(id)})`))
+                shown.add(id);
+    }
+    catch { }
+    return shown;
+}
 async function deliver($: Engine): Promise<boolean> {
     busyClear();
     const msgs = holding;
     const ids = msgs.map((m) => m.id);
     await setInflight($, msgs);
-    const res = await $.prompt.submit({ text: frame(msgs, await $.clock.now(), randomBoundary, cfg.ownerNames ?? []), asUser: cfg.asUser !== false }).catch((err: unknown) => ({ drop: 'delivery failed: ' + String(err) }));
+    const shown = await stillShown($, ids.filter((id) => handedBack.has(id)));
+    const sent = msgs.map((m) => (shown.has(m.id) ? { ...m, text: AGAIN_TEXT } : m));
+    if (shown.size)
+        $.ui.log(`messages ${[...shown].join(', ')} are still in the conversation: sent again as a pointer, not in full`, { to: 'debug' });
+    const res = await $.prompt.submit({ text: frame(sent, await $.clock.now(), randomBoundary, cfg.ownerNames ?? []), asUser: cfg.asUser !== false }).catch((err: unknown) => ({ drop: 'delivery failed: ' + String(err) }));
     if ('drop' in res && res.drop !== undefined) {
         await clearInflight($, ids);
         if ((await reserveCanBlock($)) && (await limitNow($)).hit) {
@@ -516,6 +489,8 @@ async function handBack($: Engine, msgsIn: Msg[], why: 'error' | 'refusal' | 'bl
         }
     }
     const ids = msgs.map((m) => m.id);
+    if (why !== 'blocked')
+        ids.forEach((id) => handedBack.add(id));
     const now = await $.clock.now();
     const lim = await limitNow($);
     const at = why === 'refusal' ? now + cfg.failRetrySeconds * 1000 : lim.hit ? (lim.resetAt ?? Infinity) : now + cfg.failRetrySeconds * 1000;
@@ -709,6 +684,8 @@ async function retakeLater($: Engine, gen: number) {
 }
 async function beat($: Engine) {
     await beatInflight($);
+    if (offline === 'unreachable')
+        return;
     const waitingForTyping = holding.length > 0 && !!retry && !Number.isFinite(retry.at);
     const state = stoppedReason || waitingForTyping ? 'stopped' : S.turnRunning ? 'busy' : 'listening';
     const r = await api($, 'POST', '/heartbeat', { consumer, state, version: MAIL_VERSION });
@@ -815,6 +792,19 @@ async function registerTools($: Engine) {
         inputSchema: { type: 'object', properties: {} },
     });
 }
+export async function postOutage($: Engine, body: Record<string, unknown>): Promise<'done' | 'kept'> {
+    if (!on)
+        return 'kept';
+    const r = await api($, 'POST', '/outage/report', body);
+    if (r.ok)
+        return 'done';
+    if (r.net || r.status === 0 || r.status === 429 || r.status === 401 || r.status >= 500)
+        return 'kept';
+    if (r.status === 404)
+        return 'kept';
+    $.ui.log(`outage report refused (${r.status}): ${JSON.stringify(r.body).slice(0, 160)}`, { to: 'debug' });
+    return 'done';
+}
 export async function sendSystemNote($: Engine, to: string, text: string): Promise<boolean> {
     if (!on)
         return false;
@@ -848,21 +838,25 @@ export async function mailStart($: Engine, c: Config) {
         previous = (cur ?? []).filter((x) => x !== consumer);
         return [consumer, ...previous].slice(0, 5);
     }).catch(() => undefined);
-    const rel = await api($, 'POST', '/release', { consumer, previous });
-    if (!rel.ok)
-        offline = rel.net ? 'unreachable' : String(rel.status);
     const left = await takeInflight($);
     if (left.length)
         holding = left;
-    else
-        retakeLater($, generation).catch(() => undefined);
-    await beat($);
     beatTimer = $.clock.every(cfg.beatSeconds * 1000, () => {
         if (!polling)
             void beat($);
     });
     render($);
-    loop($, generation).catch(() => undefined);
+    const gen = generation;
+    void (async () => {
+        const rel = await api($, 'POST', '/release', { consumer, previous });
+        if (!rel.ok)
+            offline = rel.net ? 'unreachable' : String(rel.status);
+        if (!left.length)
+            retakeLater($, gen).catch(() => undefined);
+        await beat($);
+        render($);
+        await loop($, gen);
+    })().catch(() => undefined);
 }
 export function mailSubmit($: Engine, e: PromptSubmitInput) {
     if (!on || !stoppedReason)
@@ -991,6 +985,11 @@ export function mailTools(onHook: On) {
         outboxLock = queued.catch(() => undefined);
         const flushed = queued.then(() => flushOutbox($));
         flushed.catch(() => undefined);
+        if (offline === 'unreachable') {
+            await queued.catch(() => undefined);
+            render($);
+            return { result: 'The messages service is not reachable right now (its machine gives no answer). The message is kept in the outbox and will be sent once the service answers; nothing is lost.' };
+        }
         if (!(await waitCapped($, flushed, SEND_WAIT_MS, next))) {
             render($);
             return { result: QUEUED_NOT_SENT };

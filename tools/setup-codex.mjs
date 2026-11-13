@@ -29,6 +29,13 @@ function backup(p) {
         copyFileSync(p, b);
 }
 const cmd = (file) => 'node "' + file + '"';
+const { service: messagesService } = await import('../hooks/messages-client.mjs');
+const MSG = (() => { try {
+    return !!messagesService();
+}
+catch {
+    return false;
+} })();
 if (!check) {
     mkdirSync(CODEX, { recursive: true });
     const hooksPath = join(CODEX, 'hooks.json');
@@ -49,7 +56,7 @@ if (!check) {
     if (hasRules)
         start.push({ type: 'command', command: cmd(rulesHook), timeout: 10, statusMessage: 'Loading the rules' });
     add('SessionStart', start);
-    add('UserPromptSubmit', [{ type: 'command', command: cmd(preTurn), timeout: 10, statusMessage: 'Recalling' }]);
+    add('UserPromptSubmit', [{ type: 'command', command: cmd(preTurn), timeout: 10, statusMessage: 'Recalling' }, ...(MSG ? [{ type: 'command', command: cmd(BRAIN + '/hooks/messages-turn.mjs') + ' codex', timeout: 10, statusMessage: 'Reading messages' }] : [])]);
     writeFileSync(hooksPath, JSON.stringify(doc, null, 2) + NL);
     say('wrote ' + hooksPath);
     const cfgPath = join(CODEX, 'config.toml');
@@ -76,6 +83,10 @@ if (!check) {
     const q = (s) => JSON.stringify(s.split(String.fromCharCode(92)).join('/'));
     setKey('mcp_servers.brain', 'command', q(process.execPath));
     setKey('mcp_servers.brain', 'args', '[' + q(BRAIN + '/tools/recall-mcp.mjs') + ']');
+    if (MSG) {
+        setKey('mcp_servers.havok-messages', 'command', q(process.execPath));
+        setKey('mcp_servers.havok-messages', 'args', '[' + q(BRAIN + '/tools/messages-mcp.mjs') + ', "--kind", "codex"]');
+    }
     writeFileSync(cfgPath, cfg.replace(/^\s+/, ''));
     say('wrote ' + cfgPath + ' (Codex memories off)');
     const agentsPath = join(CODEX, 'AGENTS.md');

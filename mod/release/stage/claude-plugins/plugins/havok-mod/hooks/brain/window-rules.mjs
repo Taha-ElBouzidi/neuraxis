@@ -458,7 +458,13 @@ function taskProblems(levels, full) {
         out.push({ kind: 'watchdog', what: 'a scheduled task that repeats on a timer', fix: 'unused' });
     return out;
 }
-export function windowProblems(tool, input) {
+const ASK_RE = /\b(open|show me|show it|pop[\s-]?up|bring up|display|launch|ouvre|ouvrir|ouvrez|affiche|afficher|montre|montrer|montre-moi)\b/i;
+const NOT_RE = /\b(do not|don't|dont|never|without|no need to|ne pas|n'ouvre|n'affiche|ne montre)\s+(?:\S+\s+){0,3}?(open|show|pop|bring up|display|launch|ouvr|affich|montr)/gi;
+export function askedForWindow(prompt) {
+    const t = String(prompt || '').replace(NOT_RE, ' ');
+    return !!t.trim() && ASK_RE.test(t);
+}
+export function windowProblems(tool, input, { asked = false } = {}) {
     if (!SHELLS.test(String(tool || '')))
         return [];
     const full = input && typeof input.command === 'string' ? input.command : '';
@@ -484,6 +490,8 @@ export function windowProblems(tool, input) {
     problems.push(...taskProblems(levels, full));
     const seen = new Set();
     return problems.filter((p) => {
+        if (asked && p.kind === 'window')
+            return false;
         const k = p.kind + '|' + p.what;
         if (seen.has(k))
             return false;
@@ -496,8 +504,8 @@ export function windowDenyReason(problems) {
     const dog = problems.filter((p) => p.kind === 'watchdog');
     const lines = [];
     if (win.length) {
-        lines.push('Blocked: this command would open a visible window (' + win.map((p) => p.what).join('; ') + '). Every command runs hidden; only a fork or branch the user asked for opens a window.');
-        lines.push('Instead: ' + [...new Set(win.map((p) => p.fix))].join('; or ') + '.');
+        lines.push('Blocked: this command would open a visible window (' + win.map((p) => p.what).join('; ') + '). Every command runs hidden unless the user asks for a window: nobody asked for one in this turn.');
+        lines.push('Instead: ' + [...new Set(win.map((p) => p.fix))].join('; or ') + '. If the user wants it on screen, tell him in one line that he can ask (for example "open it" or "show me"), and the window opens in that turn.');
     }
     if (dog.length) {
         lines.push('Blocked: this would start a timer-based watcher (' + dog.map((p) => p.what).join('; ') + '). Rule: events, not watchdogs: a failure reports itself, and a timer is allowed only where no event exists.');

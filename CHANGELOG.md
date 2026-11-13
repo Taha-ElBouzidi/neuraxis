@@ -2,10 +2,25 @@
 
 Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI assistant.
 
+## 0.4.114
+
+- **Agent messages built in.** Your assistants can send each other requests and answers through a small messages
+  service that now ships in `messages/` and runs on your own computer (127.0.0.1, your token, started at login on
+  Windows). `node tools/setup-messages.mjs` sets it up and registers every assistant it finds: Claude Code (through
+  the mod, or an MCP server and a per-prompt hook without it), Codex, Gemini CLI, Antigravity, Cursor (messages at
+  session start), Claude Desktop, VS Code with Copilot or Cline, Windsurf. More than one computer is an option
+  (`--allow`, `--join`). It needs Node 22.13 or later and says so on an older Node; the rest still runs on Node 18.
+- **A fuller starter kit.** New methods: writing a plan an agent can build from, tests that can fail, the test first,
+  handling review feedback, finding out what the person wants before building, structuring a repository, reading a
+  session transcript, the engineering rules, and for a personal assistant: triaging email, tracking follow-ups,
+  optimising the calendar, the weekly review and the morning briefing. Research, debugging, saving a memory, email
+  and briefing gained what was missing, and `METHODOLOGIES.md` carries the general working rules.
+- **Clearer words for the assistants it starts.** A branch (an exact copy of the conversation) and a fork (a clean
+  context with a brief) are the two ways to start one. A helper is hidden and reports back to the agent that started
+  it; a sub-agent is visible, with its own name and tab, and answers to the agent above it; an agent answers to you.
+
 ## 0.4.108
 
-- **A new front page.** What Neuraxis is, how to install it by pasting the link, what you get and what you need,
-  in plain words, with a moving picture of the map and a diagram of how it works.
 - **A cleaner public copy.** The code carries no comments, and the files the assistant reads speak of the person
   using it. The always-loaded rules (`REFLEX.md`) and the working rules (`METHODOLOGIES.md`) are written as neutral
   defaults that the person can change in their own context.
@@ -15,9 +30,6 @@ Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI a
 - **Documents in their place.** How it works, the full system, other assistants and the map each have their own
   page (`docs/HOW_IT_WORKS.md`, `docs/FULL_SYSTEM.md`, `docs/OTHER_ASSISTANTS.md`, `dashboard/README.md`), and the
   contribution, security and licence agreement files are in `.github/`.
-- **The map works behind a web address with a path.** Served through a site under a path such as `/AI/`, every
-  address it uses is relative, and when a proxy holds its live stream it checks for changes every 30 seconds
-  instead, so "last recall" stays current.
 - **The local server keeps every memory you save.** A memory saved just before the server stopped is committed when
   it starts again, and a restart no longer leaves the machine without a server.
 

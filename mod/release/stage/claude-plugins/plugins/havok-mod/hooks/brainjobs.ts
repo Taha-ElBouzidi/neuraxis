@@ -1,14 +1,14 @@
 import type { Engine } from './shared';
-import { VERSION, S, HOOK_MS, HOOK_MARGIN_MS, subscriptionReserve, owner, homeName, org } from './shared';
+import { VERSION, S, HOOK_MS, HOOK_MARGIN_MS, subscriptionReserve, owner, homeName, org, isMailText, hasIdleMark } from './shared';
 import { markerKey, marked, safeSession, ALIVE_DIR } from './brain/alive-rules.mjs';
 import { contentProblems, contentDenyReason, styleProblems, slipNote, writingRulesOn } from './brain/content-rules.mjs';
 import { commandProblems, HOW_TO_WRITE } from './brain/commit-message-rules.mjs';
 import { isShell, isCommitAttempt, commitDir, secretsIn, secretDenyReason, SCAN_UNFINISHED, skipsVerify, NO_VERIFY_REASON, tokenFiles, tokensFrom } from './brain/secret-rules.mjs';
 import { COMMIT_CMD, VERIFY_MS, needsVerify, failedReason, HUNG_REASON } from './brain/commitgate-rules.mjs';
 import { BYPASS_MS, type reserveOf, agentExempt, claudeFiles, hitsOf, isTyped, typedUrgent, relayedUrgent, isPing, urgentStillOpen, blockMessage, TOOL_STOP, PING_BLOCKED, blockKind, blockRow, bypassName, BYPASS_OUTBOX, BYPASS_REASON, bypassUseRow, BYPASS_MARKER, bypassMarkerAfter } from './brain/limit-rules.mjs';
-import { windowProblems, windowDenyReason } from './brain/window-rules.mjs';
+import { windowProblems, windowDenyReason, askedForWindow } from './brain/window-rules.mjs';
 import { withHelperBlock, recallQuery, withRecall } from './brain/helper-rules.mjs';
-import { HOW, toolExempt, fresh, toolDenyReason, stopBlockReason } from './brain/gate-rules.mjs';
+import { fresh } from './brain/gate-rules.mjs';
 import { type Host, hostRequest, resolveHost } from './brainhost';
 import { freshState, onPrompt, onTool, onStop } from './brain/recall-rules.mjs';
 import { snapshotOf, afterStop } from './brain/memory-rules.mjs';
@@ -90,6 +90,7 @@ export const B = {
         at: number;
     } | null,
     answerWith: '',
+    windowAsked: false,
     recallOn: false,
     recallState: freshState() as Record<string, unknown>,
     memState: undefined as unknown,
@@ -104,7 +105,7 @@ export const B = {
 };
 export function brainReset() {
     writingCache = null;
-    Object.assign(B, { ready: null, readyDone: false, home: '', claude: '', root: '', brainDir: '', machine: '', sid: '', marker: null, notes: [], startNote: '', aliveAt: 0, lastTyped: null, answerWith: '', recallOn: false, recallState: freshState(), memState: undefined, gateProbe: null, probeDone: true, probeAt: 0, gateHost: null, ctxTokens: 0, oldHooks: false });
+    Object.assign(B, { ready: null, readyDone: false, home: '', claude: '', root: '', brainDir: '', machine: '', sid: '', marker: null, notes: [], startNote: '', aliveAt: 0, lastTyped: null, answerWith: '', windowAsked: false, recallOn: false, recallState: freshState(), memState: undefined, gateProbe: null, probeDone: true, probeAt: 0, gateHost: null, ctxTokens: 0, oldHooks: false });
 }
 async function readText($: Engine, path: string): Promise<string> {
     try {
@@ -146,12 +147,62 @@ export function brainInit($: Engine, brainDirFromConfig = S.cfg?.checks.brainDir
 }
 const markerFile = () => `${B.home}/${ALIVE_DIR}/${B.sid || 'none'}.json`;
 const client = () => `${B.root}/tools/brain-client.mjs`;
+export async function markStartEarly($: Engine, data: Data) {
+    const home = slash(String((await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''));
+    const sid = safeSession(await $.session.id().catch(() => ''));
+    if (!home || !sid)
+        return;
+    const installed = parse(await readText($, `${home}/.claude/plugins/installed_plugins.json`)) as {
+        plugins?: Record<string, {
+            installPath?: string;
+        }[]>;
+    } | null;
+    const entry = (installed?.plugins?.['havok-brain@havok-brain'] ?? []).find((x) => x && x.installPath);
+    if (entry?.installPath) {
+        const hooks = await readText($, `${slash(entry.installPath)}/hooks/hooks.json`);
+        if (hooks && !hooks.includes('dispatch.mjs'))
+            return;
+    }
+    const file = `${home}/${ALIVE_DIR}/${sid}.json`;
+    let cur: unknown = null;
+    try {
+        cur = parse(await $.fs.read(file));
+    }
+    catch {
+        cur = null;
+    }
+    await $.fs.write(file, JSON.stringify(marked(cur as never, VERSION, 'SessionStart', markerKey('SessionStart', data), await $.clock.now())));
+}
 export async function markHandled($: Engine, event: string, data: Data) {
     if (!B.home || !B.sid || B.oldHooks)
         return;
     B.marker = marked(B.marker, VERSION, event, markerKey(event, data), await $.clock.now());
     B.aliveAt = await $.clock.now();
     await $.fs.write(markerFile(), JSON.stringify(B.marker));
+    if (!noteChecked) {
+        noteChecked = true;
+        await clearStartNote($).catch(() => undefined);
+    }
+}
+let noteChecked = false;
+async function clearStartNote($: Engine) {
+    const path = `${B.home}/.claude/havok-mod/backup/${B.sid}.json`;
+    if (!(await $.fs.exists(path).catch(() => false)))
+        return;
+    let note: {
+        event?: string;
+        cause?: string;
+    } = {};
+    try {
+        note = JSON.parse(await $.fs.read(path)) as typeof note;
+    }
+    catch {
+        return;
+    }
+    if (note.event !== 'SessionStart' || !['stale-marker', 'no-marker', 'event-not-handled'].includes(String(note.cause)))
+        return;
+    await $.process.run(['node', '-e', "require('fs').rmSync(process.argv[1],{force:true})", path], { timeoutMs: 10000 });
+    $.ui.log('backup note for this session start cleared: the mod handles events in this session', { to: 'debug' });
 }
 const ALIVE_REFRESH_MS = 30000;
 export async function touchAlive($: Engine) {
@@ -272,7 +323,7 @@ async function writingOn($: Engine): Promise<boolean> {
     return writingCache;
 }
 async function mainSession($: Engine) { return !!B.sid && (await readText($, `${B.claude}/havok-main-session.txt`)).trim() === B.sid; }
-async function gateFile($: Engine) { return slash(String((await $.env.get('HAVOK_GATE_STATE')) || `${B.claude}/havok-brain-gate.json`)); }
+async function gateFile($: Engine) { return slash(String((await $.env.get('HAVOK_GATE_STATE')) || `${B.claude || (S.cfg?.home ? S.cfg.home + '/.claude' : '')}/havok-brain-gate.json`)); }
 async function gateState($: Engine): Promise<GateState> { return (parse(await readText($, await gateFile($))) as GateState | null) ?? { down: false }; }
 async function reserve($: Engine) { return subscriptionReserve($, B.home, B.brainDir || B.root); }
 async function limitHits($: Engine, now: number, r: ReturnType<typeof reserveOf>) {
@@ -519,9 +570,18 @@ async function probeBrain($: Engine, g: GateHost, full: boolean) {
         return;
     }
     await putGate($, { down: true, since: prev.down ? prev.since : now, checkedAt: now, reason: why, kind: d.kind, detail: d.detail, stopBlocks: 0 });
-    B.notes.push('BRAIN DOWN, REPAIR FIRST. The brain server gave no answer at all three times over ' + Math.round(downAfterMs() / 1000) + ' s (' + why + '; ' + d.detail + ').' + (await proxyNote($)) +
-        " The user's rule (memory feedback_brain_or_vpn_down_agent_fixes_first): repair it before doing anything else in their message. Until the brain answers, every tool except reading and network repair commands is refused. " + (HOW[d.kind as keyof typeof HOW] ?? HOW.local) +
-        ' When it answers again, carry on with his message.');
+    if (!prev.down)
+        B.notes.push(`BRAIN UNREACHABLE: the brain server gave no answer three times over ${Math.round(downAfterMs() / 1000)} s (${why}; ${d.detail}).` + (await proxyNote($)) +
+            ' Until it answers, recall, memory writes and agent messages are off; everything else works. Do the work normally and say in one line that the brain is unreachable.');
+}
+export async function brainKnownDown($: Engine): Promise<boolean> {
+    try {
+        const s = await gateState($);
+        return !!s.down && known(s, await $.clock.now());
+    }
+    catch {
+        return false;
+    }
 }
 export async function brainUpAt($: Engine): Promise<number> {
     try {
@@ -549,55 +609,20 @@ async function gatePrompt($: Engine) {
     if (s.down || !known(s, now) || due(s, now))
         startProbe($, g, true, now);
 }
-async function stillDown($: Engine, job: Job, s: GateState, g: GateHost): Promise<boolean> {
-    const now = await $.clock.now();
-    if (fresh(s, now) || !B.probeDone)
-        return true;
-    startProbe($, g, false, now);
-    if (B.gateProbe && !(await waitFor($, job, B.gateProbe, () => B.probeDone, true)))
-        return true;
-    return !!(await gateState($)).down;
-}
-async function gateTool($: Engine, job: Job, tool: string, input: Data): Promise<string | null> {
-    if (await mainSession($))
-        return null;
-    if (toolExempt(tool, input))
-        return null;
-    let s = await gateState($);
-    const now = await $.clock.now();
-    const g = await gateHost($);
-    if (!g)
-        return s.down && fresh(s, now) ? toolDenyReason(s) : null;
-    if (s.down)
-        return (await stillDown($, job, s, g)) ? toolDenyReason(s) : null;
-    if (known(s, now)) {
-        if (due(s, now))
-            startProbe($, g, true, now);
-        return null;
-    }
-    startProbe($, g, true, now);
-    if (B.gateProbe)
-        await waitFor($, job, B.gateProbe, () => B.probeDone);
-    s = await gateState($);
-    return s.down ? toolDenyReason(s) : null;
-}
-async function gateStop($: Engine, job: Job): Promise<string | null> {
+async function gateTool($: Engine, _job: Job, _tool: string, _input: Data): Promise<string | null> {
     if (await mainSession($))
         return null;
     const g = await gateHost($);
     if (!g)
         return null;
-    let s = await gateState($);
-    if (!s.down && !known(s, await $.clock.now()) && B.gateProbe) {
-        await waitFor($, job, B.gateProbe, () => B.probeDone);
-        s = await gateState($);
-    }
-    if (!s.down || (s.stopBlocks || 0) >= 1)
-        return null;
-    if (!(await stillDown($, job, s, g)))
-        return null;
-    await putGate($, { ...(await gateState($)), stopBlocks: (s.stopBlocks || 0) + 1 });
-    return stopBlockReason(s);
+    const s = await gateState($);
+    const now = await $.clock.now();
+    if (!known(s, now) || due(s, now) || (s.down && !fresh(s, now)))
+        startProbe($, g, !s.down, now);
+    return null;
+}
+async function gateStop(_$: Engine, _job: Job): Promise<string | null> {
+    return null;
 }
 async function recallSwitch($: Engine) {
     const on = !!(parse(await readText($, `${B.root}/hooks/agent-search.json`)) as {
@@ -768,7 +793,7 @@ async function toolJobs($: Engine, job: Job, e: Data): Promise<ToolVerdict> {
         const problems = commandProblems(cmd);
         if (problems.length)
             return { deny: 'Commit blocked: ' + problems.join(', ') + '. ' + HOW_TO_WRITE };
-        const windows = windowProblems(tool, input);
+        const windows = windowProblems(tool, input, { asked: B.windowAsked });
         if (windows.length)
             return { deny: windowDenyReason(windows) };
     }
@@ -813,6 +838,7 @@ async function promptJobs($: Engine, job: Job, data: Data): Promise<{
         return { context: [] };
     const now = await $.clock.now();
     const prompt = String(data.prompt ?? '');
+    B.windowAsked = !isMailText(prompt) && !isPingText(prompt) && !hasIdleMark(prompt) && askedForWindow(prompt);
     B.answerWith = '';
     const limit = await limitPrompt($, data, now);
     if ('block' in limit)

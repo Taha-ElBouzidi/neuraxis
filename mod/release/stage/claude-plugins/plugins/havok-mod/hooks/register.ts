@@ -14,9 +14,9 @@ import { warmStart, warmSubmit, warmTurn } from './keepwarm';
 import { usageStart, usageTurn } from './usage';
 import { writeLayersLive, hostRelease } from './layersource';
 import { updateCheck } from './update';
-import { recallTurn } from './recall';
+import { recallTurn, recallDown } from './recall';
 import { rcStart, rcTitle, rcTurn, rcAccountChanged, rcCredentialsPath, rcPidPath, isPidPath, rcPidChanged } from './remote';
-import { brainInit, brainToolCall, brainPrompt, brainStop, brainSessionStart, brainCompact, brainRequest, markHandled, inputOf, touchAlive, takeBlockedAnswer, lightSession } from './brainjobs';
+import { brainInit, brainKnownDown, brainToolCall, brainPrompt, brainStop, brainSessionStart, brainCompact, brainRequest, markHandled, markStartEarly, inputOf, touchAlive, takeBlockedAnswer, lightSession } from './brainjobs';
 const why = (err: unknown) => String(err).slice(0, 200);
 type Data = Record<string, unknown>;
 const MARKER_WAIT_MS = 8000;
@@ -279,14 +279,16 @@ export const register: Register = (on) => {
         if ('answer' in mine)
             return next(e);
         let recall: Awaited<ReturnType<typeof recallTurn>> = { block: '' };
+        const light = await lightSession($).catch(() => false);
+        if (!light)
+            try {
+                recall = await recallTurn($, String((e as unknown as Data).prompt ?? ''), next);
+            }
+            catch (err) {
+                $.ui.log(`recall: ${why(err)}`, { to: 'debug' });
+            }
         try {
-            recall = await recallTurn($, String((e as unknown as Data).prompt ?? ''), next);
-        }
-        catch (err) {
-            $.ui.log(`recall: ${why(err)}`, { to: 'debug' });
-        }
-        try {
-            await contextLayerCheck($, recall.layers);
+            await contextLayerCheck($, recall.layers, recallDown() || (await brainKnownDown($)));
         }
         catch (err) {
             $.ui.log(`layer check: ${why(err)}`, { to: 'debug' });
@@ -336,6 +338,7 @@ export const register: Register = (on) => {
             }
             return next(e);
         }
+        await markStartEarly($, e as unknown as Data).catch(() => undefined);
         await Promise.race([startGate.p, $.clock.sleep(MARKER_WAIT_MS)]);
         try {
             await brainInit($, S.cfg?.checks.brainDir ?? '');

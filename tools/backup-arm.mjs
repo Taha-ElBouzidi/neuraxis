@@ -40,6 +40,12 @@ function writeState(home, sid, state) {
 }
 export const arm = (home, sid, why) => writeState(home, sid, { armed: true, why: String(why || '').slice(0, 300) });
 export const disarm = (home, sid) => writeState(home, sid, { armed: false });
+export function disarmAll(home) {
+    const list = armedSessions(home);
+    for (const a of list)
+        disarm(home, a.sid);
+    return list.length;
+}
 export function recompute(home, dispatchPath) {
     const file = join(home, '.claude', 'settings.json');
     let raw = '{}';

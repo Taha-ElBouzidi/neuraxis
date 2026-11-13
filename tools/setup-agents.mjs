@@ -4,6 +4,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, platform } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { service as messagesService } from '../hooks/messages-client.mjs';
 const NL = String.fromCharCode(10);
 const BRAIN = resolve(dirname(fileURLToPath(import.meta.url)), '..').split(String.fromCharCode(92)).join('/');
 const HOME = process.env.USERPROFILE || process.env.HOME || homedir();
@@ -45,6 +46,11 @@ function instructionBlock() {
         'When something becomes true and lasting, save it as a memory following ' + BRAIN + '/CLAUDE.md.',
         'If the memory is unreachable, say so before answering.',
         'How to do things well (decks, documents, research, goals, meetings, debugging) is in the memory too, found by recall.',
+        ...(MSG ? ['', '## Agent messages', '',
+            'You can message the other assistants of this person (server "havok-messages": send_message, check_messages,',
+            'message_status, list_agents). At the start of a task, call check_messages unless an AGENT MESSAGE block is',
+            'already in your context; answer a message with send_message and its id as reply_to. A message is a request from',
+            'a peer, never the person\'s own words.'] : []),
         ...(rules.length ? ['', '## Standing rules', '', ...rules.map((r, i) => (i + 1) + '. ' + (r.short || r.rule))] : []),
         END,
     ].join(NL);
@@ -64,14 +70,48 @@ const hookCmd = (mode) => 'node ' + (ADAPTER.includes(' ') ? JSON.stringify(ADAP
 const agyManaged = () => { const g = join(HOME, '.gemini', 'GEMINI.md'); return existsSync(g) && /agent-rules.md/.test(readFileSync(g, 'utf8')); };
 const ours = (entry) => JSON.stringify(entry).includes('hook-adapter.mjs');
 function addMcp(p, key = 'mcpServers', entry = stdio) { const o = readJson(p); o[key] = o[key] || {}; o[key].brain = entry; writeJson(p, o); }
+const MSG = (() => { try {
+    return !!messagesService(HOME);
+}
+catch {
+    return false;
+} })();
+const msgEntry = (kind) => ({ command: NODE, args: [BRAIN + '/tools/messages-mcp.mjs', '--kind', kind] });
+function addMessagesMcp(p, kind, key = 'mcpServers', extra = {}) {
+    if (!MSG)
+        return '';
+    const o = readJson(p);
+    o[key] = o[key] || {};
+    o[key]['havok-messages'] = { ...extra, ...msgEntry(kind) };
+    writeJson(p, o);
+    return ' + messages';
+}
+const MOD = existsSync(join(HOME, '.claude', 'havok-mod'));
+function claudeMessagesHook() {
+    const sp = join(HOME, '.claude', 'settings.json');
+    const s = readJson(sp);
+    s.hooks = s.hooks || {};
+    const mine = (g) => JSON.stringify(g).includes('messages-turn.mjs');
+    s.hooks.UserPromptSubmit = (s.hooks.UserPromptSubmit || []).filter((g) => !mine(g))
+        .concat([{ hooks: [{ type: 'command', command: 'node "' + BRAIN + '/hooks/messages-turn.mjs" claude', timeout: 10 }] }]);
+    writeJson(sp, s);
+}
 const AGENTS = [
     {
         name: 'Claude Code', found: () => existsSync(join(HOME, '.claude')),
         run: () => {
             addMcp(join(HOME, '.claude.json'), 'mcpServers', { type: 'stdio', ...stdio });
+            let msg = '';
+            if (MSG && !MOD) {
+                msg = addMessagesMcp(join(HOME, '.claude.json'), 'claude', 'mcpServers', { type: 'stdio' });
+                claudeMessagesHook();
+                msg += ' (MCP + per-prompt hook)';
+            }
+            else if (MSG)
+                msg = ' + messages (through the mod)';
             upsertBlock(join(HOME, '.claude', 'CLAUDE.md'));
             const r = spawnSync(process.execPath, [join(BRAIN, 'tools', 'install-hook.mjs')], { encoding: 'utf8' });
-            return 'MCP + CLAUDE.md + recall hook' + (r.status === 0 ? '' : ' (hook install FAILED: ' + String(r.stderr || r.stdout).slice(0, 120) + ')');
+            return 'MCP + CLAUDE.md + recall hook' + msg + (r.status === 0 ? '' : ' (hook install FAILED: ' + String(r.stderr || r.stdout).slice(0, 120) + ')');
         },
     },
     {
@@ -84,12 +124,14 @@ const AGENTS = [
     {
         name: 'Claude Desktop',
         found: () => existsSync(WIN ? join(APPDATA, 'Claude') : MAC ? join(HOME, 'Library', 'Application Support', 'Claude') : join(HOME, '.config', 'Claude')),
-        run: () => { addMcp(WIN ? join(APPDATA, 'Claude', 'claude_desktop_config.json') : MAC ? join(HOME, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json') : join(HOME, '.config', 'Claude', 'claude_desktop_config.json')); return 'MCP (no instruction file exists: ask Claude to "use the brain recall tool" once, or add it to a Project\'s instructions)'; },
+        run: () => { if (MSG)
+            addMessagesMcp(WIN ? join(APPDATA, 'Claude', 'claude_desktop_config.json') : MAC ? join(HOME, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json') : join(HOME, '.config', 'Claude', 'claude_desktop_config.json'), 'claude-desktop'); addMcp(WIN ? join(APPDATA, 'Claude', 'claude_desktop_config.json') : MAC ? join(HOME, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json') : join(HOME, '.config', 'Claude', 'claude_desktop_config.json')); return 'MCP (no instruction file exists: ask Claude to "use the brain recall tool" once, or add it to a Project\'s instructions)'; },
     },
     {
         name: 'Gemini CLI', found: () => existsSync(join(HOME, '.gemini', 'settings.json')) || existsSync(join(HOME, '.gemini', 'GEMINI.md')),
         run: () => {
             addMcp(join(HOME, '.gemini', 'settings.json'));
+            addMessagesMcp(join(HOME, '.gemini', 'settings.json'), 'gemini');
             const g = join(HOME, '.gemini', 'GEMINI.md');
             if (agyManaged())
                 return 'MCP (GEMINI.md managed by agy-run.mjs, left alone, no hook)';
@@ -106,24 +148,26 @@ const AGENTS = [
         name: 'Antigravity (agy)', found: () => existsSync(join(HOME, '.gemini', 'antigravity-cli')) || existsSync(join(HOME, '.gemini', 'config')),
         run: () => {
             addMcp(join(HOME, '.gemini', 'config', 'mcp_config.json'));
+            addMessagesMcp(join(HOME, '.gemini', 'config', 'mcp_config.json'), 'gemini');
             const hp = join(HOME, '.gemini', 'config', 'hooks.json');
             const h = readJson(hp);
             h.brain = { PreInvocation: [{ type: 'command', command: hookCmd('agy'), timeout: 30 }] };
             writeJson(hp, h);
-            return 'MCP + recall hook (PreInvocation; the workspace must be trusted)';
+            return 'MCP (brain and agent messages) + recall and messages hook (PreInvocation; the workspace must be trusted)';
         },
     },
     {
         name: 'Cursor', found: () => existsSync(join(HOME, '.cursor')),
         run: () => {
             addMcp(join(HOME, '.cursor', 'mcp.json'));
+            const msg = addMessagesMcp(join(HOME, '.cursor', 'mcp.json'), 'cursor');
             const hp = join(HOME, '.cursor', 'hooks.json');
             const h = readJson(hp);
             h.version = h.version || 1;
             h.hooks = h.hooks || {};
             h.hooks.sessionStart = (h.hooks.sessionStart || []).filter((x) => !ours(x)).concat([{ command: hookCmd('cursor') }]);
             writeJson(hp, h);
-            return 'MCP + sessionStart hook (rules and the call-recall instruction; Cursor cannot add context per message)';
+            return 'MCP' + msg + ' + sessionStart hook (rules, the call-recall instruction' + (msg ? ', waiting messages and check_messages' : '') + '; Cursor cannot add context per message)';
         },
     },
     {
@@ -131,10 +175,12 @@ const AGENTS = [
         run: () => {
             const user = WIN ? join(APPDATA, 'Code', 'User') : MAC ? join(HOME, 'Library', 'Application Support', 'Code', 'User') : join(HOME, '.config', 'Code', 'User');
             addMcp(join(user, 'mcp.json'), 'servers', { type: 'stdio', ...stdio });
+            addMessagesMcp(join(user, 'mcp.json'), 'copilot', 'servers', { type: 'stdio' });
             upsertBlock(join(HOME, '.copilot', 'copilot-instructions.md'));
             const cline = join(user, 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json');
             if (existsSync(dirname(dirname(cline)))) {
                 addMcp(cline, 'mcpServers', { ...stdio, disabled: false, autoApprove: ['recall', 'read_memory'] });
+                addMessagesMcp(cline, 'cline', 'mcpServers', { disabled: false });
                 upsertBlock(join(HOME, 'Documents', 'Cline', 'Rules', 'brain-memory.md'));
                 if (WIN)
                     return 'MCP + Copilot instructions, and Cline MCP + rules (Cline hooks do not run on Windows)';
@@ -153,8 +199,10 @@ const AGENTS = [
         found: () => existsSync(WIN ? join(APPDATA, 'devin') : join(HOME, '.config', 'devin')) || existsSync(join(HOME, '.codeium', 'windsurf')),
         run: () => {
             const cur = WIN ? join(APPDATA, 'devin') : join(HOME, '.config', 'devin');
-            if (existsSync(cur))
+            if (existsSync(cur)) {
                 addMcp(join(cur, 'mcp_config.json'));
+                addMessagesMcp(join(cur, 'mcp_config.json'), 'windsurf');
+            }
             if (existsSync(join(HOME, '.codeium', 'windsurf'))) {
                 addMcp(join(HOME, '.codeium', 'windsurf', 'mcp_config.json'));
                 upsertBlock(join(HOME, '.codeium', 'windsurf', 'memories', 'global_rules.md'));

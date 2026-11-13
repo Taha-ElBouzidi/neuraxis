@@ -2,7 +2,7 @@ import type { EngineInterface } from 'claude-code';
 import { reserveOf, accountOf, claudeFiles } from './brain/limit-rules.mjs';
 export type Engine = EngineInterface;
 export const PLUGIN = 'havok-mod';
-export const VERSION = '0.1.75';
+export const VERSION = '0.1.86';
 export const toolName = (n: string) => `mcp__${PLUGIN}__${n}`;
 export const toolMatch = (n: string) => ({ tool: new RegExp('^' + toolName(n).replace(/[.*+?^${}()|[\]\\]/g, (c) => '\\' + c) + '$') });
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,47}$/;
@@ -109,6 +109,7 @@ export type Org = {
     mailLocal: string;
     mailRemote: string;
     reportTo: string;
+    alertsTo: string;
     layerHost: string;
     brainDir: string;
     owner: string;
@@ -116,7 +117,7 @@ export type Org = {
     reviewUrl: string;
     writingStyle: string;
 };
-const NO_ORG: Org = { home: '', mailLocal: '', mailRemote: '', reportTo: '', layerHost: '', brainDir: '', owner: '', mainAgent: '', reviewUrl: '', writingStyle: '' };
+const NO_ORG: Org = { home: '', mailLocal: '', mailRemote: '', reportTo: '', alertsTo: '', layerHost: '', brainDir: '', owner: '', mainAgent: '', reviewUrl: '', writingStyle: '' };
 let ORG: Org = NO_ORG;
 export const org = (): Org => ORG;
 export const owner = () => ORG.owner || 'the owner';
@@ -124,7 +125,7 @@ export const mainAgent = () => ORG.mainAgent || 'the main agent';
 export const homeName = () => ORG.home || 'the brain server';
 export function setOrg(o: Partial<Org> | null) {
     const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
-    ORG = o ? { home: str(o.home), mailLocal: str(o.mailLocal), mailRemote: str(o.mailRemote), reportTo: str(o.reportTo), layerHost: str(o.layerHost), brainDir: str(o.brainDir), owner: str(o.owner), mainAgent: str(o.mainAgent), reviewUrl: str(o.reviewUrl), writingStyle: str(o.writingStyle) } : NO_ORG;
+    ORG = o ? { home: str(o.home), mailLocal: str(o.mailLocal), mailRemote: str(o.mailRemote), reportTo: str(o.reportTo), alertsTo: str(o.alertsTo), layerHost: str(o.layerHost), brainDir: str(o.brainDir), owner: str(o.owner), mainAgent: str(o.mainAgent), reviewUrl: str(o.reviewUrl), writingStyle: str(o.writingStyle) } : NO_ORG;
 }
 async function loadOrg($: Engine) {
     try {
