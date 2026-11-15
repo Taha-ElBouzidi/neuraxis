@@ -6,8 +6,21 @@ import { homedir, platform } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { service as messagesService } from '../hooks/messages-client.mjs';
 const NL = String.fromCharCode(10);
-const BRAIN = resolve(dirname(fileURLToPath(import.meta.url)), '..').split(String.fromCharCode(92)).join('/');
 const HOME = process.env.USERPROFILE || process.env.HOME || homedir();
+const HERE = resolve(dirname(fileURLToPath(import.meta.url)), '..').split(String.fromCharCode(92)).join('/');
+export function stableBrain(here, home) {
+    if (!/\/plugins\/cache\//i.test(here))
+        return here;
+    try {
+        const named = readFileSync(join(home, '.claude', 'havok-brain-path'), 'utf8').split(/\r?\n/)[0].trim().split(String.fromCharCode(92)).join('/');
+        if (named && existsSync(join(named, 'tools', 'setup-agents.mjs')))
+            return named;
+    }
+    catch { }
+    return here;
+}
+const BRAIN = stableBrain(HERE, HOME);
+const ONLY = (() => { const i = process.argv.indexOf('--only'); return i > 0 ? String(process.argv[i + 1] || '').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean) : []; })();
 const APPDATA = process.env.APPDATA || join(HOME, 'AppData', 'Roaming');
 const WIN = platform() === 'win32';
 const MAC = platform() === 'darwin';
@@ -227,7 +240,13 @@ const AGENTS = [
 ];
 say('brain: ' + BRAIN);
 let wired = 0;
+if (BRAIN !== HERE)
+    say('(run from ' + HERE + '; wiring the brain checkout instead)');
 for (const a of AGENTS) {
+    if (ONLY.length && !ONLY.some((w) => a.name.toLowerCase().includes(w))) {
+        say('  -  ' + a.name + ': left alone (--only)');
+        continue;
+    }
     if (!a.found()) {
         say('  -  ' + a.name + ': not installed');
         continue;

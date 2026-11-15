@@ -11,11 +11,14 @@ try {
     input = JSON.parse(readFileSync(0, 'utf8') || '{}');
 }
 catch { }
+const HOME_DIR = process.env.USERPROFILE || process.env.HOME || '';
+const AGY_CONTEXT = MODE === 'agy' && HOME_DIR && existsSync(join(HOME_DIR, '.gemini', 'havok-context.md'));
 function recall(prompt, extra = {}) {
     if (!String(prompt || '').trim())
         return '';
     const r = spawnSync(process.execPath, [join(BRAIN, 'hooks', 'pre-turn.mjs')], {
         input: JSON.stringify({ prompt, ...extra }), encoding: 'utf8', timeout: 20000, cwd: BRAIN, windowsHide: true,
+        env: { ...process.env, ...(AGY_CONTEXT ? { HAVOK_CONTEXT_GIVEN: '1' } : {}) },
     });
     try {
         return JSON.parse(r.stdout).hookSpecificOutput.additionalContext || '';

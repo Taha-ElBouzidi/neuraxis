@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MODULES = ['brain-server.mjs', 'memory-app-block.mjs', 'memory-write-checks.mjs', 'description-near.mjs', 'agy-quota-store.mjs', 'outlook-remote.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs', 'decision-store.mjs', 'decision-review.mjs', 'analytics-store.mjs'];
+const MODULES = ['brain-server.mjs', 'memory-grep.mjs', 'memory-app-block.mjs', 'memory-write-checks.mjs', 'description-near.mjs', 'agy-quota-store.mjs', 'outlook-remote.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs', 'decision-store.mjs', 'decision-review.mjs'];
 const freePort = () => new Promise((ok) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ok(p)); }); });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const roots = [];

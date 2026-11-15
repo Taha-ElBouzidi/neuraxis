@@ -12,9 +12,16 @@ const home = () => process.env.USERPROFILE || process.env.HOME || homedir();
 const APPS = new Set(['claude', 'agy', 'gemini', 'codex', 'cursor']);
 let APP = '';
 export function setApp(kind) { const k = String(kind || '').toLowerCase(); APP = APPS.has(k) ? k : ''; return APP; }
+export const AGENT_FILE = '.havok-agent';
 export function identity({ kind = 'agent', cwd = process.cwd() } = {}) {
+    try {
+        const f = String(readFileSync(join(resolve(String(cwd || '.')), AGENT_FILE), 'utf8')).split(/\r?\n/)[0].trim().toLowerCase();
+        if (AGENT_RE.test(f))
+            return f;
+    }
+    catch { }
     const env = String(process.env.HAVOK_MOD_AGENT || '').trim().toLowerCase();
-    if (AGENT_RE.test(env))
+    if (String(kind).toLowerCase() !== 'codex' && AGENT_RE.test(env))
         return env;
     const folder = basename(resolve(String(cwd || '.'))).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 40);
     const name = (String(kind).toLowerCase().replace(/[^a-z0-9]/g, '') || 'agent') + (folder ? '-' + folder : '');

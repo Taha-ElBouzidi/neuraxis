@@ -41,7 +41,7 @@ const token = () => {
         return '';
     }
 };
-function call(path, { method = 'GET', body = null, timeoutSec = 20 } = {}) {
+function call(path, { method = 'GET', body = null, timeoutSec = 20, raw = false } = {}) {
     const t = token();
     if (!t) {
         process.stderr.write('NO TOKEN on this machine. Not calling ' + path + ' with an empty credential,'
@@ -78,6 +78,8 @@ function call(path, { method = 'GET', body = null, timeoutSec = 20 } = {}) {
             input: lines.join('\n') + '\n',
             encoding: 'utf8', timeout: (timeoutSec + 2) * 1000, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
         });
+        if (raw)
+            return out;
         return JSON.parse(out || '{}');
     }
     catch (e) {
@@ -553,6 +555,86 @@ else if (cmd === 'repo' && existsSync(REPO_TOOL)) {
     const r = spawnSync(process.execPath, [REPO_TOOL, ...process.argv.slice(3)], { stdio: 'inherit', windowsHide: true });
     process.exit(r.status == null ? 1 : r.status);
 }
+else if (cmd === 'context') {
+    const app = (() => { const i = process.argv.indexOf('--app'); return i > 0 ? String(process.argv[i + 1] || '').toLowerCase() : ''; })();
+    const dir = join(homedir(), '.claude', 'havok-mod', 'layers');
+    const cache = join(dir, 'global.cache.md');
+    let global = '';
+    const got = call('/layers/global', { raw: true, timeoutSec: 8 });
+    if (typeof got === 'string' && got.trim() && !/^\s*\{/.test(got)) {
+        global = got;
+        try {
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(cache, got, 'utf8');
+        }
+        catch { }
+    }
+    else {
+        try {
+            global = readFileSync(cache, 'utf8');
+        }
+        catch {
+            global = '';
+        }
+    }
+    if (!global.trim())
+        process.exit(1);
+    let machine = '';
+    try {
+        machine = readFileSync(join(dir, 'machine.md'), 'utf8');
+    }
+    catch { }
+    const head = app ? ['You run in ' + app + ', as one of the agents of this brain. The context below is the same one every agent here works under;',
+        'it overrides your defaults. Your memory is this brain, recalled for you on every prompt: open the memory files it names.',
+        'Do not use ' + app + '\'s own memory feature.', ''] : [];
+    process.stdout.write([...head, global.trim(), ...(machine.trim() ? ['', machine.trim()] : []), ''].join(NL));
+}
+else if (cmd === 'grep') {
+    const i = process.argv.indexOf('--limit');
+    const limit = i > 0 ? Number(process.argv[i + 1]) || 20 : 20;
+    const q = process.argv.slice(3).filter((a, k, all) => a !== '--limit' && all[k - 1] !== '--limit').join(' ').trim();
+    if (q.length < 2) {
+        process.stderr.write('usage: brain-client.mjs grep "<text>" [--limit N]   (2 to 200 characters, plain text)' + NL);
+        process.exit(2);
+    }
+    const r = call('/memory-grep?q=' + encodeURIComponent(q) + '&limit=' + limit);
+    if (!r) {
+        process.stderr.write('the brain server did not answer: no full-text search right now (search matches descriptions: brain-client.mjs search)' + NL);
+        process.exit(1);
+    }
+    if (r.error) {
+        process.stderr.write('REFUSED: ' + r.error + NL);
+        process.exit(1);
+    }
+    if (!r.matches.length)
+        process.stdout.write('no memory contains "' + q + '"' + NL);
+    for (const m of r.matches) {
+        process.stdout.write(m.slug + NL);
+        for (const l of m.lines)
+            process.stdout.write('  ' + l.n + ': ' + l.text + NL);
+    }
+    if (r.capped)
+        process.stdout.write('(' + r.total + ' memories match; the first ' + r.matches.length + ' are shown: narrow the text or raise --limit, at most 50)' + NL);
+}
+else if (cmd === 'manual') {
+    const { memoryManual } = await import('./memory-grep.mjs');
+    let text = '';
+    try {
+        text = memoryManual(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
+    }
+    catch {
+        text = '';
+    }
+    if (!text) {
+        const r = call('/manual');
+        text = r && r.manual ? r.manual : '';
+    }
+    if (!text) {
+        process.stderr.write('no memory manual here and the brain server did not give one' + NL);
+        process.exit(1);
+    }
+    process.stdout.write(text);
+}
 else if (cmd === 'wa') {
     const { runWa } = await import('./wa-client.mjs').catch(() => ({ runWa: null }));
     if (!runWa) {
@@ -590,6 +672,8 @@ else {
         '  list                        secret names and dates',
         '  secret <name>               print one secret value',
         '  read <slug>                 print one memory, from the server, no local copy needed',
+        '  grep "<text>" [--limit N]   full-text search of the memories through the server (slug and matching lines)',
+        '  manual                      the memory-writing part of the brain manual: read it before your first memory write',
         '  write <slug> --file <path>  write a memory through the server (also --stdin)',
         ...(existsSync(REPO_TOOL) ? ['  repo list|url|clone|pull|push   any repo from the git server' + (gitServerUrl() ? ' (' + gitServerUrl() + ')' : '') + ', no GitHub'] : []),
         '',

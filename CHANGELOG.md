@@ -2,6 +2,18 @@
 
 Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI assistant.
 
+## 0.4.117
+
+- **Full-text search and the memory manual from anywhere.** `node tools/brain-client.mjs grep "<text>"` searches the
+  memory bodies through the local server, for any assistant and any folder, and answers each memory's name with its
+  matching lines (plain text, capped). `node tools/brain-client.mjs manual` prints the memory-writing part of CLAUDE.md,
+  for an assistant that does not start in the brain folder.
+- **Problem reports.** When an update fails, a command fails twice, the server stays down or you say something does
+  not work, your assistant offers a problem report. `node tools/report-problem.mjs prepare` writes it with names,
+  paths, addresses, keys and memory names removed; you see all of it; only on your yes, `send` opens a filled-in
+  GitHub issue in your browser and you press Submit. A report the maintainer confirms holds that version back from
+  the release track (AGENTS.md, "Reporting a problem to the maintainer").
+
 ## 0.4.116
 
 - **Two update tracks.** release, the stable one and the default, and latest, where every release lands first. A

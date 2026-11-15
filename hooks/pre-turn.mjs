@@ -798,40 +798,46 @@ try {
         catch { }
     }
     const fullRules = rulesMode === 'full' || (rulesMode === 'auto' && (turnNo % 10) === 1);
-    out.push(fullRules
-        ? 'HOW TO REPLY ' + WHO + '. Generated from the brain, delivered every turn because a rule loaded'
-        : 'HOW TO REPLY ' + WHO + ' (short form; the full text comes every 10th message).', ...(fullRules ? ['once at session start loses to recency by turn fifty.', ''] : []), '1. ' + tier);
-    let rules = null;
-    try {
-        rules = JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')).rules || [];
-    }
-    catch {
-        rules = null;
-    }
-    if (!rules || !rules.length)
-        rules = fetchRulesRemote(BRAIN);
-    let rulesFromCache = false;
-    if (!rules || !rules.length) {
-        rules = cachedRules();
-        rulesFromCache = Boolean(rules);
-    }
-    if (rulesFromCache)
-        out.push('(brain rules from this machine\'s last copy: the brain server did not answer this turn.)');
-    const matchesTopic = (r) => { if (!r.when)
-        return true; try {
-        return new RegExp(r.when, 'i').test(prompt);
-    }
-    catch {
-        return true;
-    } };
-    if (rules && rules.length)
-        rules = rules.filter(matchesTopic);
-    if (rules && rules.length) {
-        rules.forEach((r, i) => out.push(`${i + 2}. ${fullRules || !r.short ? r.rule : r.short}`));
-    }
+    const contextGiven = process.env.HAVOK_CONTEXT_GIVEN === '1'
+        || Boolean(sid && existsSync(join(homedir(), '.claude', 'havok-mod', 'context-given', sid)));
+    if (contextGiven)
+        out.push('(The rules are in the context loaded at session start.)');
     else {
-        out.push('(brain rules unavailable: no local index/rules.json and the brain server could not be'
-            + ' reached. You are running with almost no behaviour rules. Tell the person before answering.)');
+        out.push(fullRules
+            ? 'HOW TO REPLY ' + WHO + '. Generated from the brain, delivered every turn because a rule loaded'
+            : 'HOW TO REPLY ' + WHO + ' (short form; the full text comes every 10th message).', ...(fullRules ? ['once at session start loses to recency by turn fifty.', ''] : []), '1. ' + tier);
+        let rules = null;
+        try {
+            rules = JSON.parse(readFileSync(join(BRAIN, 'index', 'rules.json'), 'utf8')).rules || [];
+        }
+        catch {
+            rules = null;
+        }
+        if (!rules || !rules.length)
+            rules = fetchRulesRemote(BRAIN);
+        let rulesFromCache = false;
+        if (!rules || !rules.length) {
+            rules = cachedRules();
+            rulesFromCache = Boolean(rules);
+        }
+        if (rulesFromCache)
+            out.push('(brain rules from this machine\'s last copy: the brain server did not answer this turn.)');
+        const matchesTopic = (r) => { if (!r.when)
+            return true; try {
+            return new RegExp(r.when, 'i').test(prompt);
+        }
+        catch {
+            return true;
+        } };
+        if (rules && rules.length)
+            rules = rules.filter(matchesTopic);
+        if (rules && rules.length) {
+            rules.forEach((r, i) => out.push(`${i + 2}. ${fullRules || !r.short ? r.rule : r.short}`));
+        }
+        else {
+            out.push('(brain rules unavailable: no local index/rules.json and the brain server could not be'
+                + ' reached. You are running with almost no behaviour rules. Tell the person before answering.)');
+        }
     }
     try {
         const { planOf, planLine } = await import('./plan-rules.mjs');

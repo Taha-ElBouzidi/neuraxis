@@ -266,6 +266,28 @@ Then give the person `docs/TUTORIAL.md`'s first two things to try.
 - **Decisions** (full system): a decision you take for the person is logged with the mod's `log_decision` tool; they
   review it on the page `node tools/decision-review.mjs link` prints.
 
+## Reporting a problem to the maintainer
+
+Offer a problem report when one of these happens, at most once per problem per day:
+
+- an update fails its checks or goes back (`NEURAXIS UPDATE: ... went back to`);
+- the same Neuraxis command fails twice in a row;
+- recall or the local server stays down after the fixes in the table below;
+- your person says something in Neuraxis does not work.
+
+Ask: "Shall I prepare a problem report for the Neuraxis maintainer? You will see all of it before anything is sent."
+On a yes:
+
+1. `node tools/report-problem.mjs prepare --what "<what went wrong, in their words>" --command "<the command>" --error-file <a file with its output>`.
+   It removes the home folder, user and computer names, mail addresses, keys and memory names, and leaves out memory
+   content. It sends nothing.
+2. Show your person all of the report it prints.
+3. Only on a second yes: `node tools/report-problem.mjs send`. It opens the filled-in GitHub issue page in their
+   browser; they press Submit under their own GitHub account. Without an account, tell them where the report is
+   (`~/.neuraxis/problem-report.md`) and stop there.
+
+A report the maintainer confirms holds that version back from the release track until it is fixed.
+
 ## Contributing back
 
 If, while working for your person, you fix a bug in the engine, measure a recall change that helps, or write a

@@ -10,6 +10,7 @@ import { execFileSync, execFile, spawn } from 'node:child_process';
 import { withBrainLock } from './brain-git-lock.mjs';
 import { vaultAccess, mayReplace, ownEntries, memoryAccess, readList, listFor } from './vault-access.mjs';
 import { memoryAppRefusal } from './memory-app-block.mjs';
+import { grepMemories, memoryManual } from './memory-grep.mjs';
 import { makeRecall, SHORT_FOLLOW_UP } from './recall-core.mjs';
 import { watchTailnet } from './tailnet-watch.mjs';
 import { servedLayerFiles } from './layers-dist.mjs';
@@ -584,6 +585,19 @@ const handler = async (req, res) => {
                 'x-brain-version': indexVersion().version,
             });
             return res.end(body);
+        }
+        if (path === '/memory-grep' && req.method === 'GET') {
+            const out = grepMemories(join(BRAIN, 'memory'), url.searchParams.get('q'), { limit: url.searchParams.get('limit') });
+            if (out.error)
+                return json(res, 400, { error: out.error });
+            audit('MEMORY-GREP ' + ip + ' ' + caller.name + ' hits=' + out.total);
+            return json(res, 200, out);
+        }
+        if (path === '/manual' && req.method === 'GET') {
+            const text = memoryManual(BRAIN);
+            if (!text)
+                return json(res, 404, { error: 'this brain has no memory manual (CLAUDE.md, "## Writing a memory")' });
+            return json(res, 200, { manual: text });
         }
         if (path.startsWith('/memory/') && req.method === 'GET') {
             const slug = basename(decodeURIComponent(path.slice('/memory/'.length))).replace(/\.md$/, '');

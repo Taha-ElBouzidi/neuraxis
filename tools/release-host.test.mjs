@@ -88,7 +88,7 @@ test('the turn recall answer carries the latest release next to the layer versio
         rmSync(root, { recursive: true, force: true });
     }
 });
-const MODULES = ['brain-server.mjs', 'memory-app-block.mjs', 'memory-write-checks.mjs', 'description-near.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
+const MODULES = ['brain-server.mjs', 'memory-grep.mjs', 'memory-app-block.mjs', 'memory-write-checks.mjs', 'description-near.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
 MODULES.push('decision-store.mjs', 'decision-review.mjs');
 let root, port, child, token, published;
 const freePort = () => new Promise((ok) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ok(p)); }); });

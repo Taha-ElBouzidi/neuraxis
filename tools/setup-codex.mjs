@@ -15,7 +15,7 @@ const END = '# <<< brain memory';
 const preTurn = BRAIN + '/hooks/pre-turn.mjs';
 const sessionStart = BRAIN + '/hooks/check-session-start.mjs';
 const rulesHook = BRAIN + '/tools/codex-rules-hook.mjs';
-const hasRules = existsSync(BRAIN + '/tools/agent-rules.md') && existsSync(rulesHook);
+const hasRules = existsSync(rulesHook);
 for (const f of [preTurn, sessionStart])
     if (!existsSync(f)) {
         say('STOP: missing ' + f + '. Run this from inside the brain folder.');
@@ -77,6 +77,10 @@ if (!check) {
         body = keyRe.test(body) ? body.replace(keyRe, key + ' = ' + value) : NL + key + ' = ' + value + body;
         cfg = cfg.slice(0, from) + body + cfg.slice(end);
     };
+    if (/^project_doc_max_bytes\s*=.*$/m.test(cfg))
+        cfg = cfg.replace(/^project_doc_max_bytes\s*=.*$/m, 'project_doc_max_bytes = 131072');
+    else
+        cfg = 'project_doc_max_bytes = 131072' + NL + cfg;
     setKey('features', 'memories', 'false');
     setKey('memories', 'generate_memories', 'false');
     setKey('memories', 'use_memories', 'false');

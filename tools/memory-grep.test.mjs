@@ -1,0 +1,40 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { grepMemories, memoryManual } from './memory-grep.mjs';
+test('plain case-insensitive search: slug and matching lines, capped, never a pattern', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grep-'));
+    const mem = join(dir, 'memory');
+    mkdirSync(mem);
+    writeFileSync(join(mem, 'reference_a.md'), 'line one\nThe Router address is 192.168.11.1\nnothing\nrouter again\nrouter thrice\nrouter four\n');
+    writeFileSync(join(mem, 'reference_b.md'), 'no match here\n');
+    writeFileSync(join(mem, 'reference_c.md'), 'a ROUTER too\n');
+    writeFileSync(join(mem, 'MEMORY.md'), 'router in the generated router file\n');
+    const r = grepMemories(mem, 'router');
+    assert.deepEqual(r.matches.map((m) => m.slug), ['reference_a', 'reference_c']);
+    assert.equal(r.matches[0].lines.length, 3, 'three lines per memory at most');
+    assert.equal(r.matches[0].lines[0].n, 2);
+    const one = grepMemories(mem, 'router', { limit: 1 });
+    assert.equal(one.matches.length, 1);
+    assert.equal(one.total, 2);
+    assert.equal(one.capped, true);
+    assert.equal(grepMemories(mem, '.*').total, 0, 'a pattern is plain text');
+    assert.ok(grepMemories(mem, 'x').error);
+    rmSync(dir, { recursive: true, force: true });
+});
+test('a long line is cut around the match', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grep-'));
+    writeFileSync(join(dir, 'reference_long.md'), 'x'.repeat(1000) + ' needle ' + 'y'.repeat(1000) + '\n');
+    const l = grepMemories(dir, 'needle').matches[0].lines[0].text;
+    assert.ok(l.includes('needle') && l.length <= 246, l.length);
+    rmSync(dir, { recursive: true, force: true });
+});
+test('the manual is the "## Writing a memory" section of CLAUDE.md', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'man-'));
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Brain\n\n## Tiers\nt\n\n## Writing a memory\n\nOne fact.\n\n## Layout\nl\n');
+    assert.equal(memoryManual(dir), '## Writing a memory\n\nOne fact.\n');
+    assert.equal(memoryManual(join(dir, 'nope')), '');
+    rmSync(dir, { recursive: true, force: true });
+});
