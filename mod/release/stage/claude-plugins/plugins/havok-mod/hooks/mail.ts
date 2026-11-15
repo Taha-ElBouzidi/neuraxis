@@ -177,7 +177,7 @@ async function call($: Engine, method: string, path: string, body?: unknown): Pr
     try {
         const r = await $.http.fetch(cfg.url + path, {
             method,
-            headers: { authorization: 'Bearer ' + token, 'x-agent': cfg.agent, 'content-type': 'application/json' },
+            headers: { authorization: 'Bearer ' + token, 'x-agent': cfg.agent, 'x-agent-app': 'claude', 'content-type': 'application/json' },
             body: body === undefined ? undefined : JSON.stringify(body),
         });
         let parsed: Record<string, unknown> = {};
@@ -281,17 +281,40 @@ export function statusWords(b: Body, nowMs: number = Date.now()): string {
     const recipient = b.recipient as Body | undefined;
     const who = recipient ? ` The recipient is ${presence(recipient, nowMs)}.` : '';
     const text = typeof b.text === 'string' ? `\n<<<\n${quoted(b.text)}\n>>>` : '';
-    return `Message ${String(b.id)} from ${String(b.from)} to ${String(b.to)}, sent ${utc(String(b.sent_at))} (${since(b.sent_at, nowMs)}): ${state}.${heldLine}${who}${text}`;
+    return `Message ${String(b.id)} from ${String(b.from_full || b.from)} to ${String(b.to_full || b.to)}, sent ${utc(String(b.sent_at))} (${since(b.sent_at, nowMs)}): ${state}.${heldLine}${who}${text}`;
 }
-export function agentsWords(b: Body, nowMs: number = Date.now()): string {
+export type AgentsAsk = {
+    filter?: string;
+    all?: boolean;
+    archived?: boolean;
+};
+export const RECENT_MS = 24 * 3600000;
+export function agentsWords(b: Body, nowMs: number = Date.now(), ask: AgentsAsk = {}): string {
     const aliases = Object.entries((b.aliases as Record<string, string> | undefined) ?? {});
     const agents = (Array.isArray(b.agents) ? b.agents : []) as Body[];
-    const lines = agents.filter((a) => a.address !== b.me).map((a) => {
+    const shown = (a: Body) => String(a.full || a.address);
+    const isArchived = (a: Body) => !!a.archived || a.state === 'archived';
+    const recent = (a: Body) => !!a.listening || a.state === 'stopped' || String(a.state ?? '').startsWith('restored') || (Number(a.waiting) || 0) > 0
+        || (typeof a.last_seen === 'string' && nowMs - Date.parse(a.last_seen) < RECENT_MS);
+    const want = String(ask.filter ?? '').trim().toLowerCase();
+    const matches = (a: Body) => !want || [shown(a), ...aliases.filter(([, to]) => to === a.address).map(([n]) => n)].some((s) => s.toLowerCase().includes(want));
+    const others = agents.filter((a) => a.address !== b.me && matches(a));
+    const archivedOut = ask.archived ? [] : others.filter(isArchived);
+    const live = others.filter((a) => ask.archived || !isArchived(a));
+    const quietOut = want || ask.all ? [] : live.filter((a) => !recent(a));
+    const listed = live.filter((a) => !quietOut.includes(a));
+    const lines = listed.map((a) => {
         const names = aliases.filter(([, to]) => to === a.address).map(([n]) => n);
         const n = Number(a.waiting) || 0;
-        return `- ${String(a.address)}${names.length ? ` (also ${names.join(', ')})` : ''}: ${presence(a, nowMs)}${n ? `, ${n} message${n === 1 ? '' : 's'} waiting` : ''}${a.may_message ? '' : ', you may not message it'}`;
+        return `- ${shown(a)}${names.length ? ` (also ${names.join(', ')})` : ''}: ${presence(a, nowMs)}${n ? `, ${n} message${n === 1 ? '' : 's'} waiting` : ''}${a.may_message ? '' : ', you may not message it'}`;
     });
-    return `You are ${String(b.me)}.${lines.length ? '\n' + lines.join('\n') : ' No other agent is known.'}`;
+    const more: string[] = [];
+    if (quietOut.length)
+        more.push(`${quietOut.length} more not seen in the last day (all: true lists them, or filter with part of a name or machine)`);
+    if (archivedOut.length)
+        more.push(`${archivedOut.length} archived (archived: true lists them)`);
+    const none = want ? ` No agent matches "${String(ask.filter).trim()}".` : ' No other agent is known.';
+    return `You are ${String(b.me_full || b.me)}.${lines.length ? '\n' + lines.join('\n') : more.length ? '' : none}${more.length ? '\n' + more.join('\n') : ''}`;
 }
 export const stripSignature = (text: string, from: string): string => frameRules.stripSignature(text, from);
 const randomBoundary = () => crypto.randomUUID().replace(/-/g, '').slice(0, 8);
@@ -760,7 +783,7 @@ function describeSent(b: Record<string, unknown>): string {
     const n = rec.already_waiting;
     const queue = typeof n === 'number' && n > 0 ? ` ${n} message${n === 1 ? '' : 's'} already wait${n === 1 ? 's' : ''} for it.` : '';
     const dup = b.duplicate ? ' (it had already reached the messages service; it is not sent twice)' : '';
-    return `Sent: message ${String(b.id)} to ${String(b.to)}${dup}. The recipient ${where}.${queue}`;
+    return `Sent: message ${String(b.id)} to ${String(b.to_full || b.to)}${dup}. The recipient ${where}.${queue}`;
 }
 async function registerTools($: Engine) {
     await $.tool.register({
@@ -788,8 +811,12 @@ async function registerTools($: Engine) {
     await $.tool.register({
         name: 'list_agents',
         isDeferred: false,
-        description: 'List the agents the Havok messages service knows, whether each is listening now, and whether you may message it.',
-        inputSchema: { type: 'object', properties: {} },
+        description: 'List the agents the Havok messages service knows, whether each is listening now, and whether you may message it. By default only the agents active in the last day; the rest are counted. filter, all and archived list more.',
+        inputSchema: { type: 'object', properties: {
+                filter: { type: 'string', description: 'Only agents whose address or alias contains this (a name, a machine or an app).' },
+                all: { type: 'boolean', description: 'Every agent that is not archived, also those not seen in the last day.' },
+                archived: { type: 'boolean', description: 'Include archived agents.' },
+            } },
     });
 }
 export async function postOutage($: Engine, body: Record<string, unknown>): Promise<'done' | 'kept'> {
@@ -1016,13 +1043,18 @@ export function mailTools(onHook: On) {
             return { deny: problem(r) };
         return { result: statusWords(r.body) };
     }).catch(() => ({ deny: 'The status check failed in the mod; try again.' }));
-    onHook('tool.call', toolMatch('list_agents'), async ($) => {
+    onHook('tool.call', toolMatch('list_agents'), async ($, e) => {
         if (!on)
             return { deny: 'Havok messages are not configured in this folder.' };
         const r = await api($, 'GET', '/agents');
         if (!r.ok)
             return { deny: problem(r) };
-        return { result: agentsWords(r.body) };
+        const input = e as unknown as {
+            filter?: unknown;
+            all?: unknown;
+            archived?: unknown;
+        };
+        return { result: agentsWords(r.body, Date.now(), { filter: typeof input.filter === 'string' ? input.filter : '', all: input.all === true, archived: input.archived === true }) };
     }).catch(() => ({ deny: 'Listing the agents failed in the mod; try again.' }));
 }
 export const stopForTests = () => { generation++; on = false; beatTimer?.cancel(); };

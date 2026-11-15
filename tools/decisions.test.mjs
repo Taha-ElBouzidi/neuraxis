@@ -157,7 +157,7 @@ test('search: the person\'s name and one-word agent names say nothing about a de
         rmSync(b, { recursive: true, force: true });
     }
 });
-const MODULES = ['brain-server.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs', 'decision-store.mjs', 'decision-review.mjs', 'decisions-page.html'];
+const MODULES = ['brain-server.mjs', 'memory-app-block.mjs', 'memory-write-checks.mjs', 'description-near.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs', 'decision-store.mjs', 'decision-review.mjs', 'decisions-page.html'];
 const REVIEWER = 'owner@github';
 let root, port, pagePort, child, token, stub, stubPort, key;
 const sent = [];

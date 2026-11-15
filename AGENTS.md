@@ -60,7 +60,8 @@ know, take the default in brackets and say so.
 4. **What do you want help with?** Their own words. You use them for the global context and to pick the three kit
    methods you show them.
 5. **Do you want the map of your memory?** (no)
-6. **Updates: automatic, tell me first, or off?** (automatic) See section 5.
+6. **Updates: automatic, tell me first, or off? And stable releases, or every release as soon as it is out?**
+   (automatic, stable) See section 5.
 7. **Where should it live?** (a folder named `neuraxis` in their home folder) The memory lives there, so it is their
    choice, not the folder you happened to start in.
 8. **Do you want your assistant to follow a strict plain-writing style?** (no) With yes, the hooks refuse em dashes,
@@ -201,7 +202,8 @@ line, once. Their choice from section 3:
 
 ```
 node tools/update.mjs --on | --notify | --off     automatic (default), tell only, or off
-node tools/update.mjs --status                    the setting and the last result
+node tools/update.mjs --track release | latest    stable releases (default), or every release as soon as it is out
+node tools/update.mjs --status                    the setting, the track and the last result
 ```
 
 Update by hand with `node tools/update.mjs`, never `git pull`: it never touches their memories and rolls back a

@@ -439,7 +439,7 @@ else if (cmd === 'write') {
         process.stderr.write('the body is empty, refusing to write' + NL);
         process.exit(1);
     }
-    const r = call('/memory', { method: 'POST', body: { slug: arg, content, by: whoAmI() }, timeoutSec: 300 });
+    const r = call('/memory', { method: 'POST', body: { slug: arg, content, by: whoAmI({ app: true }) }, timeoutSec: 300 });
     if (!r) {
         process.stderr.write('The server did not answer, so NOTHING was written. Do not commit this to'
             + ' your local clone instead: the server owns writes and git is only its backup.' + NL
@@ -476,7 +476,7 @@ else if (cmd === 'delete') {
         process.exit(1);
     }
     const r = call('/memory/' + encodeURIComponent(arg), {
-        method: 'DELETE', body: { why, force: process.argv.includes('--force'), by: whoAmI() }, timeoutSec: 120,
+        method: 'DELETE', body: { why, force: process.argv.includes('--force'), by: whoAmI({ app: true }) }, timeoutSec: 120,
     });
     if (!r) {
         process.stderr.write('The server did not answer, so NOTHING was deleted. Never delete from your'

@@ -53,7 +53,8 @@ installs it with you, checking each step. You do not need to type any command yo
   they can send each other requests and answers through a small messages service that runs on your own computer.
   Your assistant sets it up for you. More in [messages/README.md](messages/README.md).
 - **Updates that explain themselves.** It updates itself at most once a day, checks that everything still works, and
-  tells you in one plain sentence what changed. Your own memories are never touched.
+  tells you in one plain sentence what changed. Your own memories are never touched. You choose stable releases (the
+  default) or every release as soon as it is out.
 
 ### The full system, for Claude Code on Windows
 

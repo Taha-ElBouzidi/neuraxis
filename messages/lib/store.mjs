@@ -82,6 +82,9 @@ export function openStore(dataDir, { leaseMs, consumerStaleMs, listeningMs, log,
         db.exec('ALTER TABLE messages ADD COLUMN failed_reason TEXT');
     if (!cols.includes('failed_count'))
         db.exec('ALTER TABLE messages ADD COLUMN failed_count INTEGER NOT NULL DEFAULT 0');
+    const acols = db.prepare('PRAGMA table_info(agents)').all().map((c) => c.name);
+    if (!acols.includes('app'))
+        db.exec('ALTER TABLE agents ADD COLUMN app TEXT');
     const ccols = db.prepare('PRAGMA table_info(consumers)').all().map((c) => c.name);
     if (!ccols.includes('first_seen')) {
         db.exec('ALTER TABLE consumers ADD COLUMN first_seen INTEGER');
@@ -120,9 +123,9 @@ export function openStore(dataDir, { leaseMs, consumerStaleMs, listeningMs, log,
         restoreSet: db.prepare('INSERT INTO restores(address, archived, restored_at) VALUES(?,?,?) ON CONFLICT(address) DO UPDATE SET archived = excluded.archived, restored_at = COALESCE(excluded.restored_at, restores.restored_at)'),
         newConsumer: db.prepare('SELECT 1 AS x FROM consumers WHERE address = ? AND first_seen > ? LIMIT 1'),
         pendingRecipients: db.prepare('SELECT DISTINCT recipient FROM messages WHERE delivered_at IS NULL AND undeliverable_at IS NULL'),
-        agentSeen: db.prepare(`INSERT INTO agents(address, machine, first_seen, last_seen, consumer, state, version) VALUES(?,?,?,?,?,?,?)
+        agentSeen: db.prepare(`INSERT INTO agents(address, machine, first_seen, last_seen, consumer, state, version, app) VALUES(?,?,?,?,?,?,?,?)
       ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen, consumer = excluded.consumer,
-      state = COALESCE(excluded.state, agents.state), version = COALESCE(excluded.version, agents.version)`),
+      state = COALESCE(excluded.state, agents.state), version = COALESCE(excluded.version, agents.version), app = COALESCE(excluded.app, agents.app)`),
         agent: db.prepare('SELECT * FROM agents WHERE address = ?'),
         agentsNamed: db.prepare("SELECT * FROM agents WHERE address LIKE ? ESCAPE '\\'"),
         agents: db.prepare('SELECT * FROM agents ORDER BY address'),
@@ -170,8 +173,8 @@ export function openStore(dataDir, { leaseMs, consumerStaleMs, listeningMs, log,
         if (consumer)
             q.consumerSeen.run(consumer, address, now, now);
     }
-    function seen(address, machine, { consumer = null, state = null, version = null } = {}, now = Date.now()) {
-        q.agentSeen.run(address, machine, now, now, consumer, state, version);
+    function seen(address, machine, { consumer = null, state = null, version = null, app = null } = {}, now = Date.now()) {
+        q.agentSeen.run(address, machine, now, now, consumer, state, version, app);
         touchConsumer(consumer, address, now);
     }
     function restartPending(address) {
@@ -236,6 +239,8 @@ export function openStore(dataDir, { leaseMs, consumerStaleMs, listeningMs, log,
             seq: m.seq,
             from: m.sender,
             to: m.recipient,
+            from_full: full(m.sender),
+            to_full: full(m.recipient),
             state: stateOf(m, now),
             reply_to: m.reply_to || null,
             thread: m.thread,
@@ -262,6 +267,8 @@ export function openStore(dataDir, { leaseMs, consumerStaleMs, listeningMs, log,
             out.history = q.events.all(m.id).map((e) => ({ at: new Date(e.at).toISOString(), event: e.kind, detail: e.detail || undefined }));
         return out;
     }
+    function appOf(address) { const a = q.agent.get(address); return a && a.app ? a.app : null; }
+    function full(address) { const app = appOf(address); return app ? address + '@' + app : address; }
     function insert({ sender, recipient, text, bytes, replyTo, parent, idemKey, expectReply, replyTimeoutMs }) {
         return durableTx(() => {
             const now = Date.now();
@@ -426,6 +433,8 @@ export function openStore(dataDir, { leaseMs, consumerStaleMs, listeningMs, log,
     }
     return {
         db,
+        appOf,
+        full,
         get: (id) => q.get.get(id),
         byKey: (sender, key) => q.byKey.get(sender, key),
         repliesBy: (id, sender) => q.repliesBy.get(id, sender).n,

@@ -80,6 +80,7 @@ if (!check) {
     setKey('features', 'memories', 'false');
     setKey('memories', 'generate_memories', 'false');
     setKey('memories', 'use_memories', 'false');
+    setKey('shell_environment_policy.set', 'HAVOK_APP', '"codex"');
     const q = (s) => JSON.stringify(s.split(String.fromCharCode(92)).join('/'));
     setKey('mcp_servers.brain', 'command', q(process.execPath));
     setKey('mcp_servers.brain', 'args', '[' + q(BRAIN + '/tools/recall-mcp.mjs') + ']');
@@ -114,7 +115,7 @@ if (!check) {
 }
 let failed = 0;
 function test(label, file, input) {
-    const r = spawnSync(process.execPath, [file], { input: JSON.stringify(input), encoding: 'utf8', timeout: 60000 });
+    const r = spawnSync(process.execPath, [file], { input: JSON.stringify(input), encoding: 'utf8', timeout: 180000 });
     let ctx = '';
     try {
         ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext || '';
@@ -137,7 +138,7 @@ if (hasRules)
         { jsonrpc: '2.0', method: 'notifications/initialized' },
         { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'recall', arguments: { message: 'what are the rules for writing a memory' } } },
     ].map((m) => JSON.stringify(m)).join(NL) + NL;
-    const r = spawnSync(process.execPath, [BRAIN + '/tools/recall-mcp.mjs'], { input: lines, encoding: 'utf8', timeout: 60000 });
+    const r = spawnSync(process.execPath, [BRAIN + '/tools/recall-mcp.mjs'], { input: lines, encoding: 'utf8', timeout: 180000 });
     let got = '';
     try {
         got = JSON.parse(r.stdout.trim().split(NL).pop()).result.content[0].text;

@@ -142,8 +142,16 @@ function lastTurnAt(path) {
 {
     const own = mod && !modOff && mod.own && typeof mod.own === "object" ? mod.own : null;
     if (own && (own.model || own.effort)) {
-        const fam = (m) => (/fable/i.test(m) ? "Fable" : /opus/i.test(m) ? "Opus" : /sonnet/i.test(m) ? "Sonnet" : /haiku/i.test(m) ? "Haiku" : m);
-        const name = own.model ? fam(String(own.model)) : model;
+        const fam = (m) => {
+            const f = /fable/i.test(m) ? "Fable" : /opus/i.test(m) ? "Opus" : /sonnet/i.test(m) ? "Sonnet" : /haiku/i.test(m) ? "Haiku" : "";
+            if (!f)
+                return m;
+            const v = /(?:fable|opus|sonnet|haiku)[-_ ]?(\d+)(?:[-_.](\d{1,2})(?!\d))?/i.exec(m);
+            return v ? `${f} ${v[1]}${v[2] ? "." + v[2] : ""}` : f;
+        };
+        let name = own.model ? fam(String(own.model)) : model;
+        if (own.model && !/\d/.test(name) && model && model.toLowerCase().startsWith(name.toLowerCase()))
+            name = model;
         const lvl = own.effort || d.effort?.level || "";
         const text = `${c.orange}${name}${c.reset}${lvl ? ` ${c.dim}${lvl}${c.reset}` : ""} ${c.dim}(own)${c.reset}`;
         if (model)
@@ -269,6 +277,12 @@ if (mod) {
             const l = w.last;
             if (l && typeof l.ok === "boolean")
                 warm += l.ok ? (Number(l.read) > 0 ? ` ${c.green}last ok${c.reset}` : ` ${c.yellow}last cold${c.reset}`) : ` ${c.red}last failed${c.reset}`;
+        }
+        const touched = Math.max(Date.parse(mod.lastRequest || "") || 0, w && w.last && w.last.ok && Number(w.last.read) > 0 ? Date.parse(w.last.at) || 0 : 0);
+        if (touched > 0) {
+            const left = Math.ceil((touched + 60 * 60 * 1000 - Date.now()) / 60000);
+            const cache = left > 0 ? `${c.dim}Cache cold in${c.reset} ${left > 10 ? c.green : c.yellow}${left}m${c.reset}` : `${c.yellow}Cache cold${c.reset}`;
+            warm = warm ? `${warm}${sep}${cache}` : cache;
         }
         let rc = "";
         const r = mod.rc;

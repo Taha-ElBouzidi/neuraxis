@@ -148,7 +148,7 @@ const AGENTS = [
         name: 'Antigravity (agy)', found: () => existsSync(join(HOME, '.gemini', 'antigravity-cli')) || existsSync(join(HOME, '.gemini', 'config')),
         run: () => {
             addMcp(join(HOME, '.gemini', 'config', 'mcp_config.json'));
-            addMessagesMcp(join(HOME, '.gemini', 'config', 'mcp_config.json'), 'gemini');
+            addMessagesMcp(join(HOME, '.gemini', 'config', 'mcp_config.json'), 'agy');
             const hp = join(HOME, '.gemini', 'config', 'hooks.json');
             const h = readJson(hp);
             h.brain = { PreInvocation: [{ type: 'command', command: hookCmd('agy'), timeout: 30 }] };

@@ -8,7 +8,7 @@ const NL = String.fromCharCode(10);
 const LONG_DASHES = [String.fromCharCode(0x2014), String.fromCharCode(0x2013)];
 const argv = process.argv.slice(2);
 const flag = (k) => { const i = argv.indexOf(k); return i > -1 ? argv[i + 1] : null; };
-const SAME = 0.75, RELATED = 0.55;
+import { nearDescriptions, SAME, RELATED } from './description-near.mjs';
 const KINDS = ['user', 'contact', 'project', 'feedback', 'reference'];
 const problems = [], notes = [];
 let text = '', desc = '', slug = '';
@@ -76,33 +76,7 @@ try {
         }
         return Array.from((await local(text, { pooling: 'mean', normalize: true })).data);
     };
-    const vector = await vec(slug ? slug.replace(/_/g, ' ') + '. ' + desc : desc);
-    const kw = JSON.parse(readFileSync(join(BRAIN, 'index', 'keywords.json'), 'utf8'));
-    const cacheFile = join(tmpdir(), 'havok-neuron-check-descriptions.json');
-    let cache = {};
-    try {
-        cache = JSON.parse(readFileSync(cacheFile, 'utf8'));
-    }
-    catch { }
-    const emb = { slugs: Object.keys(kw.descriptions).sort(), vectors: [] };
-    let fresh = 0;
-    for (const s of emb.slugs) {
-        const text = s.replace(/_/g, ' ') + '. ' + kw.descriptions[s];
-        if (!cache[s] || cache[s].t !== text) {
-            cache[s] = { t: text, v: await vec(text) };
-            fresh++;
-        }
-        emb.vectors.push(cache[s].v);
-    }
-    if (fresh)
-        writeFileSync(cacheFile, JSON.stringify(cache));
-    near = emb.slugs.map((s, i) => {
-        const v = emb.vectors[i];
-        let d = 0;
-        for (let k = 0; k < v.length; k++)
-            d += vector[k] * v[k];
-        return [s, d];
-    }).filter(([s]) => s !== slug).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    near = await nearDescriptions({ brain: BRAIN, slug, desc, embed: vec });
 }
 catch (e) {
     notes.push('could not compare with the brain (no embed service and no local model, run npm install): ' + e.message);

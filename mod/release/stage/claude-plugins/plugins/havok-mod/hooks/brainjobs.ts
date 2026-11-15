@@ -415,7 +415,11 @@ async function limitPrompt($: Engine, data: Data, now: number): Promise<{
     if (typed)
         await $.fs.write(bypassFile(), String(now + BYPASS_MS)).catch(() => undefined);
     const { five, week, hits } = await limitHits($, now, r);
-    const pass = async () => ({ pass: isTyped(data) && !isPing(data) ? await limitHeld($, now) : '' });
+    const pass = async () => {
+        if (isTyped(data) && !isPing(data))
+            cancelResume();
+        return { pass: isTyped(data) && !isPing(data) ? await limitHeld($, now) : '' };
+    };
     if (!hits.length)
         return pass();
     if (isPing(data)) {
@@ -431,6 +435,7 @@ async function limitPrompt($: Engine, data: Data, now: number): Promise<{
     if (isTyped(data)) {
         const row = { ...(parse(blockRow(now, B.sid, 'prompt', 'UserPromptSubmit', five, week)) as object), text: String(data.prompt ?? '') };
         await appendLine($, `${B.claude}/havok-limit-blocks.jsonl`, JSON.stringify(row) + '\n');
+        await armResume($, hits, now);
         return { answer: blockedNotice(hits, r.mainName || r.mainAgent) };
     }
     await logLimit($, 'prompt', 'UserPromptSubmit', five, week, now);
@@ -458,7 +463,51 @@ async function limitTool($: Engine, tool: string, now: number): Promise<string |
         return null;
     }
     await logLimit($, blockKind('PreToolUse', tool), 'PreToolUse', five, week, now);
+    await armResume($, hits, now);
     return blockMessage(hits, r.mainName || r.mainAgent) + TOOL_STOP;
+}
+export const RESUME_GRACE_MS = 60000;
+export function resetOf(hits: ReturnType<typeof hitsOf>['hits']): number {
+    const at = hits.map(([, w]) => Number((w as {
+        resets_at?: number;
+    } | null)?.resets_at) * 1000).filter((t) => Number.isFinite(t) && t > 0);
+    return at.length ? Math.max(...at) : 0;
+}
+export function resumeText(at: number): string {
+    return `LIMIT RESET: the usage limit reset (${new Date(at).toISOString().slice(11, 16)} UTC). Resume the work the limit stopped, starting where you wrote you stopped; the held messages follow.`;
+}
+let resumeTimer: {
+    cancel: () => void;
+} | null = null;
+let resumeAt = 0;
+function cancelResume() { resumeTimer?.cancel(); resumeTimer = null; resumeAt = 0; }
+async function armResume($: Engine, hits: ReturnType<typeof hitsOf>['hits'], now: number) {
+    const at = resetOf(hits);
+    if (!at || at <= now || (resumeTimer && resumeAt >= at))
+        return;
+    resumeTimer?.cancel();
+    resumeAt = at;
+    resumeTimer = $.clock.after(at - now + RESUME_GRACE_MS, () => void resumeFire($));
+    $.ui.log(`limit: resume armed for ${new Date(at + RESUME_GRACE_MS).toISOString()}`, { to: 'debug' });
+}
+async function resumeFire($: Engine) {
+    resumeTimer = null;
+    resumeAt = 0;
+    try {
+        const now = await $.clock.now();
+        const { hits } = await limitHits($, now, await reserve($));
+        if (hits.length) {
+            await armResume($, hits, now);
+            return;
+        }
+        if (S.turnRunning)
+            return;
+        $.ui.log('limit: reset passed, starting the resume turn', { to: 'debug' });
+        await $.prompt.submit({ text: resumeText(now), asUser: true });
+    }
+    catch (err) {
+        $.ui.log(`limit: resume: ${String((err as Error)?.message ?? err)}`, { to: 'debug' });
+    }
 }
 const HEALTH_MS = 6000;
 const DOWN_AFTER_MS = 30000;

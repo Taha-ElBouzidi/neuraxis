@@ -34,6 +34,13 @@ if (argv[0] !== '--worker') {
             process.stderr.write('usage: node tools/save-brain.mjs --fallback "commit message" <slug> [<slug>...]' + NL);
             process.exit(1);
         }
+        const { appOf } = await import('./provenance.mjs');
+        const { memoryAppRefusal } = await import('./memory-app-block.mjs');
+        const refused = memoryAppRefusal(BRAIN, { app: appOf() });
+        if (refused) {
+            process.stderr.write(refused.text + NL);
+            process.exit(1);
+        }
         const st = spawnSync(process.execPath, [join(BRAIN, 'tools', 'brain-client.mjs'), 'status'], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
         if (/\bUP on\b/.test(String(st.stdout))) {
             process.stderr.write('the brain server is up: save the memory through it, node tools/brain-client.mjs write <slug> --file <path>. The fallback is only for a server that does not answer.' + NL);

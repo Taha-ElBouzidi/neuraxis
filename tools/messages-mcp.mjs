@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { identity, machineName, send, receive, status, agents } from '../hooks/messages-client.mjs';
+import { identity, machineName, send, receive, status, agents, setApp } from '../hooks/messages-client.mjs';
 const KIND = (() => { const i = process.argv.indexOf('--kind'); return i > 0 ? String(process.argv[i + 1] || 'agent') : 'agent'; })();
 const NL = String.fromCharCode(10);
 const TOOLS = [
@@ -20,11 +20,30 @@ const TOOLS = [
     },
     {
         name: 'list_agents',
-        description: 'The agents the messages service knows, whether each is listening now, and whether you may message it.',
-        inputSchema: { type: 'object', properties: {} },
+        description: 'The agents the messages service knows, whether each is listening now, and whether you may message it. By default only the agents active in the last day; the rest are counted. filter, all and archived list more.',
+        inputSchema: { type: 'object', properties: {
+                filter: { type: 'string', description: 'Only agents whose address contains this (a name, a machine or an app).' },
+                all: { type: 'boolean', description: 'Every agent that is not archived, also those not seen in the last day.' },
+                archived: { type: 'boolean', description: 'Include archived agents.' },
+            } },
     },
 ];
+const APPNAME = setApp(KIND);
 const me = () => identity({ kind: KIND, cwd: process.cwd() });
+export function shortList(b, ask = {}, now = Date.now()) {
+    if (!b || !Array.isArray(b.agents))
+        return b;
+    const want = String(ask.filter || '').trim().toLowerCase();
+    const isArch = (a) => !!a.archived || a.state === 'archived';
+    const recent = (a) => !!a.listening || a.state === 'stopped' || String(a.state || '').startsWith('restored') || (Number(a.waiting) || 0) > 0
+        || (typeof a.last_seen === 'string' && now - Date.parse(a.last_seen) < 24 * 3600000);
+    const others = b.agents.filter((a) => !want || String(a.full || a.address).toLowerCase().includes(want));
+    const archived = ask.archived ? 0 : others.filter(isArch).length;
+    const live = others.filter((a) => ask.archived || !isArch(a));
+    const quiet = want || ask.all ? [] : live.filter((a) => !recent(a));
+    const agents = live.filter((a) => !quiet.includes(a)).map((a) => ({ address: a.full || a.address, state: a.state, waiting: a.waiting || 0, may_message: a.may_message, last_seen: a.last_seen }));
+    return { me: b.me_full || b.me, agents, ...(quiet.length ? { not_seen_in_the_last_day: quiet.length } : {}), ...(archived ? { archived } : {}) };
+}
 const words = (o) => (typeof o === 'string' ? o : JSON.stringify(o, null, 1));
 async function run(name, args) {
     const agent = me();
@@ -34,7 +53,7 @@ async function run(name, args) {
             return 'Not sent: ' + r.error;
         if (r.queued)
             return 'Queued, not sent yet: ' + r.why + '.';
-        return `Sent: message ${r.id} to ${r.to}, from ${agent}@${machineName()}.`;
+        return `Sent: message ${r.id} to ${r.to}, from ${agent}@${machineName()}${APPNAME ? "@" + APPNAME : ""}.`;
     }
     if (name === 'check_messages') {
         const r = await receive(agent, { session: process.env.HAVOK_MESSAGES_SESSION || '' });
@@ -45,7 +64,7 @@ async function run(name, args) {
     if (name === 'message_status')
         return words(await status(agent, args.id));
     if (name === 'list_agents')
-        return words(await agents(agent));
+        return words(shortList(await agents(agent), args || {}));
     throw new Error('unknown tool ' + name);
 }
 const ok = (id, result) => ({ jsonrpc: '2.0', id, result });

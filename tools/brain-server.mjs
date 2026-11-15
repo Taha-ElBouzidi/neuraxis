@@ -1,3 +1,5 @@
+import { writeChecks } from './memory-write-checks.mjs';
+import { nearDescriptions, SAME as SAME_DESCRIPTION } from './description-near.mjs';
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, statSync, readdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +9,7 @@ import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { execFileSync, execFile, spawn } from 'node:child_process';
 import { withBrainLock } from './brain-git-lock.mjs';
 import { vaultAccess, mayReplace, ownEntries, memoryAccess, readList, listFor } from './vault-access.mjs';
+import { memoryAppRefusal } from './memory-app-block.mjs';
 import { makeRecall, SHORT_FOLLOW_UP } from './recall-core.mjs';
 import { watchTailnet } from './tailnet-watch.mjs';
 import { servedLayerFiles } from './layers-dist.mjs';
@@ -691,6 +694,32 @@ const handler = async (req, res) => {
             }
             const file = join(BRAIN, 'memory', slug + '.md');
             const existed = existsSync(file);
+            const wc = writeChecks({ head, body: fm.slice(end + 4), desc });
+            if (wc.refuse) {
+                audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' ' + wc.refuse.error);
+                return json(res, 400, wc.refuse);
+            }
+            if (!existed && !/^distinct:\s*true\s*$/m.test(head)) {
+                try {
+                    const e = await getEmbedder();
+                    const embed = async (t) => Array.from((await e(t, { pooling: 'mean', normalize: true })).data);
+                    const same = (await nearDescriptions({ brain: BRAIN, slug, desc, embed })).filter(([, d]) => d >= SAME_DESCRIPTION);
+                    if (same.length) {
+                        audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' duplicate of ' + same.map(([s2]) => s2).join(','));
+                        return json(res, 409, { error: 'already in the brain', candidates: same.map(([s2]) => s2),
+                            detail: 'this description is ' + same.map(([s2, d]) => s2 + ' (' + d.toFixed(2) + ')').join(', ')
+                                + ': update that memory instead of adding a second one (write it under its slug), or replace it. If this really is a different fact, add "distinct: true" to the head.' });
+                    }
+                }
+                catch (err) {
+                    audit('DUPLICATE-CHECK-SKIPPED ' + slug + ' ' + String(err.message).slice(0, 80));
+                }
+            }
+            const appRefusal = memoryAppRefusal(BRAIN, body.by);
+            if (appRefusal) {
+                audit('MEMORY-WRITE-REFUSED-APP ' + ip + ' ' + caller.name + ' ' + slug + ' ' + appRefusal.app);
+                return json(res, 403, { error: 'not allowed', detail: appRefusal.text });
+            }
             const mAccess = memoryAccess(caller, { method: 'POST', slug, exists: existed, force: false });
             if (mAccess !== 'allow') {
                 audit('MEMORY-WRITE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + mAccess);
@@ -701,7 +730,7 @@ const handler = async (req, res) => {
                 writeFileSync(file, fm, 'utf8');
                 recordProvenance([{ slug, action: existed ? 'update' : 'new' }], { ...(body.by || {}), machine: caller.name }, 'server');
                 queueBrainSave(slug, existed, caller.name, ip);
-                return json(res, 200, { ok: true, slug, updated: existed, queued: true, pushed: null, v: indexVersion().version });
+                return json(res, 200, { ok: true, slug, updated: existed, queued: true, pushed: null, v: indexVersion().version, ...(wc.warnings.length ? { warnings: wc.warnings } : {}) });
             }
             catch (e) {
                 audit('MEMORY-WRITE-FAIL ' + ip + ' ' + caller.name + ' ' + slug + ' ' + String(e.message).slice(0, 80));
@@ -728,6 +757,11 @@ const handler = async (req, res) => {
                 body = JSON.parse(raw || '{}');
             }
             catch { }
+            const appRefusal = memoryAppRefusal(BRAIN, body.by);
+            if (appRefusal) {
+                audit('MEMORY-DELETE-REFUSED-APP ' + ip + ' ' + caller.name + ' ' + slug + ' ' + appRefusal.app);
+                return json(res, 403, { error: 'not allowed', detail: appRefusal.text });
+            }
             const dAccess = memoryAccess(caller, { method: 'DELETE', slug, exists: true, force: !!body.force });
             if (dAccess !== 'allow') {
                 audit('MEMORY-DELETE-REFUSED ' + ip + ' ' + caller.name + ' ' + slug + ' scope: ' + dAccess);

@@ -16,7 +16,7 @@ process.on('warning', (w) => { if (w.name !== 'ExperimentalWarning')
         f(w); });
 const { openStore } = await import('./lib/store.mjs');
 const APP = dirname(fileURLToPath(import.meta.url));
-const VERSION = '1.8.1';
+const VERSION = '1.9.0';
 const PORT = Number(process.env.MAIL_PORT || process.env.PORT || 8499);
 const HOST = process.env.MAIL_HOST || '127.0.0.1';
 const BRAIN_HOME = process.env.MAIL_BRAIN_HOME || process.env.HAVOK_HOME || join(homedir(), '.claude');
@@ -29,6 +29,7 @@ const MAX_BODY = 256 * 1024;
 const MAX_WAIT_S = 28;
 const AGENT_RE = /^[a-z0-9][a-z0-9._-]{0,47}$/;
 const MACHINE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const APP_RE = /^[a-z][a-z0-9-]{0,15}$/;
 const KEY_RE = /^[A-Za-z0-9._:-]{8,128}$/;
 const DEFAULT_LIMITS = {
     maxTextBytes: 32768, perSenderPerMinute: 20, perSenderPerHour: 200, perMachinePerMinute: 60,
@@ -298,12 +299,15 @@ function resolveRecipient(r, to, caller) {
     if (!t)
         throw new HttpError(400, 'to is required');
     if (t.includes('@')) {
-        const [agent, machine] = t.split('@');
-        if (!AGENT_RE.test(agent) || !MACHINE_RE.test(machine || ''))
-            throw new HttpError(400, 'to must be agent@MACHINE or a known agent name');
+        const [agent, machine, app, ...rest] = t.split('@');
+        if (rest.length || !AGENT_RE.test(agent) || !MACHINE_RE.test(machine || '') || (app !== undefined && !APP_RE.test(app.toLowerCase())))
+            throw new HttpError(400, 'to must be agent@MACHINE@app, agent@MACHINE or a known agent name');
         const m = r.machines.find((x) => x.toLowerCase() === machine.toLowerCase());
         if (!m)
             throw new HttpError(404, `machine ${machine} is not on the messages roster`);
+        const known = store.appOf(`${agent}@${m}`);
+        if (app !== undefined && known && known !== app.toLowerCase())
+            throw new HttpError(404, `${agent}@${m} runs in ${known}: its address is ${agent}@${m}@${known}`);
         return `${agent}@${m}`;
     }
     const name = t.toLowerCase();
@@ -486,7 +490,9 @@ async function route(req, res) {
     const agentName = String(req.headers['x-agent'] || url.searchParams.get('agent') || '').toLowerCase();
     if (!AGENT_RE.test(agentName))
         return send(res, 400, { error: 'x-agent header (the agent name, lowercase letters, digits, . _ -) is required' });
-    const caller = { machine: who.machine, kind: who.kind, address: `${agentName}@${who.machine}` };
+    const appHead = String(req.headers['x-agent-app'] || url.searchParams.get('app') || '').toLowerCase();
+    const app = APP_RE.test(appHead) ? appHead : null;
+    const caller = { machine: who.machine, kind: who.kind, address: `${agentName}@${who.machine}`, app };
     let body = {};
     if (req.method === 'POST') {
         const raw = await readBody(req);
@@ -533,14 +539,14 @@ async function route(req, res) {
         const wait = Math.min(Math.max(Math.floor(Number(url.searchParams.get('wait')) || 0), 0), MAX_WAIT_S);
         const since = Math.max(0, Math.floor(Number(url.searchParams.get('since')) || 0));
         const take = () => store.lease(caller.address, consumer, max).filter((m) => m.seq > since);
-        store.seen(caller.address, caller.machine, { consumer });
+        store.seen(caller.address, caller.machine, { consumer, app: caller.app });
         let msgs = take();
         if (!msgs.length && wait > 0) {
             await waitForMail(caller.address, wait, res);
             if (res.destroyed || res.writableEnded)
                 return;
             roster();
-            store.seen(caller.address, caller.machine, { consumer });
+            store.seen(caller.address, caller.machine, { consumer, app: caller.app });
             msgs = take();
         }
         return send(res, 200, {
@@ -587,10 +593,10 @@ async function route(req, res) {
     if (req.method === 'POST' && path === '/heartbeat') {
         const consumer = consumerOf(body.consumer);
         const state = body.state === 'stopped' ? 'stopped' : body.state === 'busy' ? 'busy' : 'listening';
-        store.seen(caller.address, caller.machine, { consumer, state, version: String(body.version || '').slice(0, 40) || null });
+        store.seen(caller.address, caller.machine, { consumer, state, version: String(body.version || '').slice(0, 40) || null, app: caller.app });
         if (state !== 'stopped')
             store.renew(caller.address, consumer);
-        return send(res, 200, { me: caller.address, waiting: store.pendingCount(caller.address), receipts: { delivered_unseen: store.unseenCount(caller.address) }, now: new Date().toISOString() });
+        return send(res, 200, { me: caller.address, me_full: store.full(caller.address), waiting: store.pendingCount(caller.address), receipts: { delivered_unseen: store.unseenCount(caller.address) }, now: new Date().toISOString() });
     }
     if (req.method === 'GET' && (path.startsWith('/status/') || path === '/status')) {
         const id = path.startsWith('/status/') ? decodeURIComponent(path.slice(8)) : null;
@@ -617,7 +623,7 @@ async function route(req, res) {
         const list = open ? rows.filter((m) => m.state !== 'done').slice(0, limit) : rows;
         const shown = new Set(list.map((m) => m.id));
         store.markSeen(caller.address, sentRows.filter((m) => shown.has(m.id)).map((m) => m.id));
-        return send(res, 200, { me: caller.address, messages: list });
+        return send(res, 200, { me: caller.address, me_full: store.full(caller.address), messages: list });
     }
     if (req.method === 'POST' && path === '/roster/archive') {
         if (typeof body.archived !== 'boolean')
@@ -639,14 +645,14 @@ async function route(req, res) {
     }
     if (req.method === 'GET' && path === '/agents') {
         const now = Date.now();
-        let agents = store.agents().filter((a) => !isRetired(r, a.address)).map((a) => ({ address: a.address, machine: a.machine, ...store.agentView(a, now), waiting: store.pendingCount(a.address), may_message: a.address !== caller.address && !mayTalk(r, caller.address, a.address) }));
+        let agents = store.agents().filter((a) => !isRetired(r, a.address)).map((a) => ({ address: a.address, full: a.app ? a.address + "@" + a.app : a.address, app: a.app || null, machine: a.machine, ...store.agentView(a, now), waiting: store.pendingCount(a.address), may_message: a.address !== caller.address && !mayTalk(r, caller.address, a.address) }));
         for (const ad of r.archived)
             if (!ad.includes('*') && ad.includes('@') && !agents.some((a) => a.address.toLowerCase() === ad.toLowerCase()) && !isRetired(r, ad)) {
                 agents.push({ address: ad, machine: ad.split('@')[1], listening: false, state: 'archived', archived: true, last_seen: null, waiting: store.pendingCount(ad), may_message: ad !== caller.address && !mayTalk(r, caller.address, ad) });
             }
         if (isRestricted(r, caller.address))
             agents = agents.filter((a) => a.may_message || a.address === caller.address);
-        return send(res, 200, { me: caller.address, aliases: r.aliases, agents });
+        return send(res, 200, { me: caller.address, me_full: store.full(caller.address), aliases: r.aliases, agents });
     }
     return send(res, 404, { error: 'no such route' });
 }

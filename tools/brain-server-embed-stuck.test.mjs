@@ -8,7 +8,7 @@ import { request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MODULES = ['brain-server.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
+const MODULES = ['brain-server.mjs', 'memory-app-block.mjs', 'memory-write-checks.mjs', 'description-near.mjs', 'agy-quota-store.mjs', 'brain-git-lock.mjs', 'vault-access.mjs', 'recall-core.mjs', 'recall-graph-worker.mjs', 'tailnet-watch.mjs', 'provenance.mjs', 'tokenize.mjs', 'layers-dist.mjs', 'server-alerts.mjs', 'archive-upload.mjs', 'layer-host.mjs', 'recall-turn.mjs', 'release-host.mjs', 'embed-guard.mjs', 'embed-worker.mjs'];
 MODULES.push('decision-store.mjs', 'decision-review.mjs');
 const EMBED_TIMEOUT_MS = 1500;
 let root, home, port, child, token;

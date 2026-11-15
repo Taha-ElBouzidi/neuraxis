@@ -2,7 +2,7 @@ import type { EngineInterface } from 'claude-code';
 import { reserveOf, accountOf, claudeFiles } from './brain/limit-rules.mjs';
 export type Engine = EngineInterface;
 export const PLUGIN = 'havok-mod';
-export const VERSION = '0.1.86';
+export const VERSION = '0.1.89';
 export const toolName = (n: string) => `mcp__${PLUGIN}__${n}`;
 export const toolMatch = (n: string) => ({ tool: new RegExp('^' + toolName(n).replace(/[.*+?^${}()|[\]\\]/g, (c) => '\\' + c) + '$') });
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,47}$/;
@@ -517,6 +517,7 @@ export type StatusFile = {
     rc?: RcStatus;
     own?: OwnStatus;
     decisions?: number;
+    lastRequest?: string;
 };
 const parts = new Map<string, string>();
 let cleaned: CleanedContext | null = null;
@@ -565,7 +566,7 @@ async function writeStatus($: Engine, force: boolean, refreshMs = STATUS_REFRESH
     const c = S.cfg;
     if (!c || !S.sessionId)
         return;
-    const s = { agent: c.agent, turn: S.turnRunning ? 'running' : 'idle', ...statusOf(parts), ...(cleaned ? { context: cleaned } : {}), ...(warm ? { warm } : {}), ...(cleanedAt ? { cleanedAt } : {}), ...(waitingUpdate ? { update: waitingUpdate } : {}), ...(rc ? { rc } : {}), ...(ownStatus ? { own: ownStatus } : {}), ...(decisionsWaiting >= 0 ? { decisions: decisionsWaiting } : {}) };
+    const s = { agent: c.agent, turn: S.turnRunning ? 'running' : 'idle', ...statusOf(parts), ...(cleaned ? { context: cleaned } : {}), ...(warm ? { warm } : {}), ...(cleanedAt ? { cleanedAt } : {}), ...(waitingUpdate ? { update: waitingUpdate } : {}), ...(rc ? { rc } : {}), ...(ownStatus ? { own: ownStatus } : {}), ...(decisionsWaiting >= 0 ? { decisions: decisionsWaiting } : {}), ...(S.lastRequest > 0 ? { lastRequest: new Date(Math.floor(S.lastRequest / 60000) * 60000).toISOString() } : {}) };
     const key = JSON.stringify(s);
     const now = await $.clock.now();
     if (!force && key === lastWrite && now - lastWriteAt < refreshMs)

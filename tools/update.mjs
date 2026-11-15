@@ -8,7 +8,8 @@ import { isPublicInstall, envOf } from './public-install.mjs';
 export const STATE = '.update-state.json';
 export const LOCK = '.update.lock';
 export const LOG = '.update.log';
-const CHANNEL = 'main';
+export const TRACKS = ['release', 'latest'];
+const LEGACY = 'main';
 const NS = 'refs/infinite-context';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LOCK_STALE_MS = 60 * 60 * 1000;
@@ -56,6 +57,15 @@ export function settings(brain, env = process.env) {
     if (v === 'notify')
         return { mode: 'notify', source: 'brain.json' };
     return { mode: 'install', source: v === undefined ? 'default' : 'brain.json' };
+}
+export function trackOf(brain, env = process.env) {
+    const e = String(env.NEURAXIS_UPDATE_TRACK || '').trim().toLowerCase();
+    if (TRACKS.includes(e))
+        return { track: e, source: 'NEURAXIS_UPDATE_TRACK' };
+    const v = String(readJson(join(brain, 'brain.json'), {}).updateTrack || '').trim().toLowerCase();
+    if (TRACKS.includes(v))
+        return { track: v, source: 'brain.json' };
+    return { track: 'release', source: 'default' };
 }
 function upstreamUrl(brain) {
     const r = readJson(join(brain, 'package.json'), {}).repository;
@@ -282,13 +292,15 @@ function update({ brain, env, mode, url, log }) {
     catch { }
     if (!top || !samePath(top, brain))
         return { status: 'no-git', from, reason: 'this install is not a git clone of the repository' };
-    let head = null;
+    const track = trackOf(brain, env).track;
+    const heads = {};
     const tags = [];
     try {
-        for (const line of listOf(git(['ls-remote', '--refs', url, 'refs/heads/' + CHANNEL, 'refs/tags/v*'], NET_MS))) {
+        for (const line of listOf(git(['ls-remote', '--refs', url, 'refs/heads/' + track, 'refs/heads/' + LEGACY, 'refs/tags/v*'], NET_MS))) {
             const [sha, ref] = line.split(/\s+/);
-            if (ref === 'refs/heads/' + CHANNEL)
-                head = sha;
+            const h = String(ref || '').match(/^refs\/heads\/(.+)$/);
+            if (h)
+                heads[h[1]] = sha;
             const m = String(ref || '').match(/^refs\/tags\/(v\d+\.\d+\.\d+)$/);
             if (m)
                 tags.push({ tag: m[1], version: m[1].slice(1) });
@@ -297,6 +309,8 @@ function update({ brain, env, mode, url, log }) {
     catch (e) {
         return { status: 'error', from, reason: 'could not reach ' + url + ': ' + firstLine(e) };
     }
+    const CHANNEL = heads[track] ? track : LEGACY;
+    const head = heads[CHANNEL] || null;
     const newer = tags.filter((t) => compareVersions(t.version, from) > 0).sort((a, b) => compareVersions(b.version, a.version));
     if (!head || !newer.length)
         return { status: 'current', from };
@@ -496,7 +510,7 @@ function describe(r) {
         default: return r.status + (r.reason ? ': ' + r.reason : '');
     }
 }
-function setSetting(brain, value) {
+function setSetting(brain, value, key = 'autoUpdate') {
     const p = join(brain, 'brain.json');
     let cfg = {};
     if (existsSync(p)) {
@@ -507,7 +521,7 @@ function setSetting(brain, value) {
             throw new Error('brain.json is not valid JSON, so it was left alone; fix it first');
         }
     }
-    cfg.autoUpdate = value;
+    cfg[key] = value;
     writeJson(p, cfg);
 }
 function main(argv) {
@@ -519,10 +533,22 @@ function main(argv) {
         say('automatic updates: ' + (value === false ? 'off' : value === 'notify' ? 'notify only, install by hand with node tools/update.mjs' : 'on'));
         return;
     }
+    if (has('--track')) {
+        const t = String(argv[argv.indexOf('--track') + 1] || '').toLowerCase();
+        if (!TRACKS.includes(t)) {
+            say('usage: node tools/update.mjs --track release|latest (release: stable, the default; latest: every release as soon as it is out)');
+            process.exit(2);
+        }
+        setSetting(SELF, t, 'updateTrack');
+        say('update track: ' + t + (t === 'latest' ? ' (every release as soon as it is out)' : ' (stable releases only)'));
+        return;
+    }
     if (has('--status')) {
         const s = settings(SELF);
         const st = readJson(join(SELF, STATE), {}) || {};
         say('automatic updates : ' + { install: 'on', notify: 'notify only', off: 'off' }[s.mode] + ' (' + s.source + ')');
+        const tr = trackOf(SELF);
+        say('update track      : ' + tr.track + ' (' + tr.source + ')');
         say('this install      : ' + (readJson(join(SELF, 'package.json'), {}).version || 'unknown'));
         say('last check        : ' + (st.lastCheck || 'never'));
         if (st.last)

@@ -2,15 +2,16 @@ export const CHECK_MARK = 'havok-check-system:';
 export const LAUNCHERS = ['open-fork-session.ps1', 'open-havok.ps1', 'restart-havok.ps1', 'run-agent.ps1', 'agent-launch.ps1', 'restart-agent.ps1', 'relaunch-rc.ps1'];
 const MAX_DEPTH = 3;
 const SHELLS = /^(Bash|PowerShell)$/;
-const DESKTOP = new Set(['notepad', 'notepad++', 'mspaint', 'calc', 'wordpad', 'charmap', 'regedit', 'taskmgr', 'mmc', 'eventvwr', 'msinfo32', 'winver',
-    'snippingtool', 'osk', 'magnify', 'mstsc', 'powershell_ise', 'winword', 'excel', 'powerpnt', 'outlook', 'mshta', 'wt']);
-const BROWSERS = new Set(['chrome', 'msedge', 'firefox', 'brave', 'iexplore']);
 const VEHICLES = new Set(['wt', 'start-process', 'saps', 'start', 'powershell', 'pwsh', 'cmd']);
-const ALWAYS_WINDOW = new Set(['wt', 'mshta']);
-const OPENS_PROGRAM = /\.(?:exe|bat|cmd|ps1|msi)\b|^\s*\$/i;
 const SEPARATORS = /[;|&\n\r(){}<>]/;
-const FIX_START = 'add -WindowStyle Hidden (or -NoNewWindow) to Start-Process; open a window only for a fork or branch the user asked for';
-const FIX_APP = 'do not open it: read a file with the Read tool, run programs hidden, and open a window only for a fork or branch the user asked for';
+const FIX_START = 'add -WindowStyle Hidden (or -NoNewWindow) to Start-Process, or use the tool background mode for a long job';
+const FIX_TERM = 'run the command hidden; to open an agent, open its terminal profile (wt -w 0 new-tab -p "<profile>") or tools/open-fork-session.ps1';
+const CONSOLE = new Set(['powershell', 'pwsh', 'cmd', 'bash', 'sh', 'zsh', 'wsl', 'conhost', 'node', 'python', 'python3', 'py', 'deno', 'bun',
+    'npm', 'npx', 'pnpm', 'yarn', 'git', 'cscript', 'claude', 'codex', 'gemini', 'agy', 'ssh', 'adb', 'curl', 'wget', 'schtasks', 'reg', 'netsh',
+    'tailscale', 'ffmpeg', 'java', 'dotnet', 'go', 'cargo', 'make', 'gh']);
+const SCRIPT_EXT = /\.(?:ps1|bat|cmd|sh|py|js|mjs|cjs|ts)$/i;
+const isConsole = (target) => !!target && (CONSOLE.has(noExe(lower(target))) || SCRIPT_EXT.test(target));
+const WT_PROFILE = /(?:^|\s)(?:-p|--profile)\s+\S/i;
 const FIX_TASK = 'register the task with the action conhost.exe --headless <program> <script> for a long-running job, or wscript.exe with a run-hidden.vbs wrapper for a short one, or run it as SYSTEM';
 const FIX_LOOP = 'make the thing that can fail report itself (an event, a push, the process exit) instead of looking at it in a loop';
 const lower = (s) => String(s).toLowerCase();
@@ -295,55 +296,39 @@ function statementProblems(st, lang, run) {
     };
     const isStartProcess = b === 'start-process' || b === 'saps' || (b === 'start' && lang !== 'sh');
     if (isStartProcess && lang !== 'cmd') {
-        const target = baseName(startProcessTarget(st, h));
+        const raw = startProcessTarget(st, h);
+        const target = baseName(raw);
         const tname = noExe(target);
         const hidden = /(?:^|\s)-(?:NoNew\w*|nnw)\b/i.test(rest) || /(?:^|\s)-wi\w*[:\s]+['"]?hidden\b/i.test(rest);
-        const variable = /(?:^|\s)-wi\w*[:\s]+\$/i.test(rest);
-        if (tname === 'wt' || tname === 'mshta')
-            add(tname + ' opens a window that -WindowStyle Hidden does not hide', FIX_APP);
-        else if (target.endsWith('.lnk'))
-            add('a .lnk shortcut launch', FIX_APP);
-        else if (tname === 'explorer') {
-            const at = restRaw.indexOf(target);
-            if (!OPENS_PROGRAM.test(restRaw.slice(at < 0 ? 0 : at + target.length)))
-                add('explorer.exe of a folder', FIX_APP);
+        if (tname === 'wt') {
+            if (!WT_PROFILE.test(restRaw))
+                add('wt running a command opens a terminal (an agent tab names its profile with -p)', FIX_TERM);
+            return out;
         }
-        else if (!hidden && !variable)
-            add('Start-Process without -WindowStyle Hidden or -NoNewWindow', FIX_START);
+        if (tname === 'conhost' && /--headless\b/i.test(restRaw))
+            return out;
+        if (!hidden && (/^\$/.test(String(raw)) || isConsole(target)))
+            add('Start-Process of ' + (/^\$/.test(String(raw)) ? 'a program named by a variable' : target) + ' without -WindowStyle Hidden or -NoNewWindow opens a terminal', FIX_START);
         return out;
     }
     if (lang === 'cmd' && b === 'start') {
-        if (!/(?:^|\s)\/b\b/i.test(rest))
-            add('start opens a new window (only start /b does not)', 'use start /b, or run the program directly; for a fork or branch use tools/open-fork-session.ps1');
+        if (/(?:^|\s)\/b\b/i.test(rest))
+            return out;
+        const args = restRaw.replace(/^\s*"[^"]*"\s*/, ' ').replace(/(?:^|\s)\/(?:min|max|wait|d\s+\S+|i|low|normal|high|realtime|abovenormal|belownormal|separate|shared|affinity\s+\S+)\b/gi, ' ').trim();
+        const t = baseName((/^(?:"([^"]+)"|(\S+))/.exec(args) || [])[1] || (/^(?:"([^"]+)"|(\S+))/.exec(args) || [])[2] || '');
+        if (noExe(t) === 'wt') {
+            if (!WT_PROFILE.test(args))
+                add('wt running a command opens a terminal (an agent tab names its profile with -p)', FIX_TERM);
+            return out;
+        }
+        if (!t || isConsole(t))
+            add('start opens a terminal for ' + (t || 'a command') + ' (only start /b does not)', 'use start /b, or run the program directly; for an agent use its terminal profile or tools/open-fork-session.ps1');
         return out;
     }
-    if (b === 'explorer') {
-        if (!OPENS_PROGRAM.test(restRaw))
-            add('explorer.exe of a folder', FIX_APP);
+    if (b === 'wt' && !WT_PROFILE.test(restRaw)) {
+        add('wt running a command opens a terminal (an agent tab names its profile with -p)', FIX_TERM);
         return out;
     }
-    if (h.name && /\.lnk["']?$/i.test(h.name)) {
-        add('a .lnk shortcut launch', FIX_APP);
-        return out;
-    }
-    if (b === 'invoke-item' || b === 'ii') {
-        add('Invoke-Item opens the file in its program', FIX_APP);
-        return out;
-    }
-    if (DESKTOP.has(b)) {
-        add(b + ' opens a window', FIX_APP);
-        return out;
-    }
-    if (BROWSERS.has(b) && !/(?:^|\s)--(?:headless|version)\b/.test(rest)) {
-        add(b + ' opens a browser window (only --headless does not)', FIX_APP);
-        return out;
-    }
-    if (b === 'out-gridview' || b === 'show-command') {
-        add(b + ' opens a window', FIX_APP);
-        return out;
-    }
-    if (lang === 'ps' && /\bMessageBox\]::Show\b/i.test(st.skel))
-        add('a message box', FIX_APP);
     void run;
     return out;
 }
@@ -459,10 +444,11 @@ function taskProblems(levels, full) {
     return out;
 }
 const ASK_RE = /\b(open|show me|show it|pop[\s-]?up|bring up|display|launch|ouvre|ouvrir|ouvrez|affiche|afficher|montre|montrer|montre-moi)\b/i;
-const NOT_RE = /\b(do not|don't|dont|never|without|no need to|ne pas|n'ouvre|n'affiche|ne montre)\s+(?:\S+\s+){0,3}?(open|show|pop|bring up|display|launch|ouvr|affich|montr)/gi;
+const NOT_RE = /\b(do not|don't|dont|never|without|no need to|ne pas|n'ouvre|n'affiche|ne montre)\s+(?:\S+\s+){0,3}?(open|show|pop|bring up|display|launch|ouvr|affich|montr|see|a tab|a window|a terminal|any window|voir|onglet|fenêtre)/gi;
+const SEE_RE = /\b(?:(?:so |that |where |for me to |let me |I (?:can|could|want to|would like to|need to) |I'd like to )see|visible|on (?:my |the )?screen|(?:a |an |its own |new |separate )+(?:tab|window|terminal)|que je (?:peux |puisse )?voir|je veux voir|dans un (?:nouvel )?onglet|une (?:nouvelle )?fenêtre)\b/i;
 export function askedForWindow(prompt) {
     const t = String(prompt || '').replace(NOT_RE, ' ');
-    return !!t.trim() && ASK_RE.test(t);
+    return !!t.trim() && (ASK_RE.test(t) || SEE_RE.test(t));
 }
 export function windowProblems(tool, input, { asked = false } = {}) {
     if (!SHELLS.test(String(tool || '')))
@@ -504,8 +490,8 @@ export function windowDenyReason(problems) {
     const dog = problems.filter((p) => p.kind === 'watchdog');
     const lines = [];
     if (win.length) {
-        lines.push('Blocked: this command would open a visible window (' + win.map((p) => p.what).join('; ') + '). Every command runs hidden unless the user asks for a window: nobody asked for one in this turn.');
-        lines.push('Instead: ' + [...new Set(win.map((p) => p.fix))].join('; or ') + '. If the user wants it on screen, tell him in one line that he can ask (for example "open it" or "show me"), and the window opens in that turn.');
+        lines.push('Blocked: this command would open a terminal window (' + win.map((p) => p.what).join('; ') + '). Commands never open a terminal: they run hidden or in the background. Agents, files, images, browsers and apps are not refused.');
+        lines.push('Instead: ' + [...new Set(win.map((p) => p.fix))].join('; or ') + '.');
     }
     if (dog.length) {
         lines.push('Blocked: this would start a timer-based watcher (' + dog.map((p) => p.what).join('; ') + '). Rule: events, not watchdogs: a failure reports itself, and a timer is allowed only where no event exists.');

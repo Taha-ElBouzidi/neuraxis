@@ -2,6 +2,24 @@
 
 Neuraxis (called Infinite Context until 0.4.107): a lasting memory for your AI assistant.
 
+## 0.4.116
+
+- **Two update tracks.** release, the stable one and the default, and latest, where every release lands first. A
+  release moves to the stable track after a week with no problem known, or sooner on the maintainer's word. Choose
+  with `node tools/update.mjs --track release` or `--track latest`; `--status` shows the track. The install
+  conversation asks.
+- **Existing installs move by themselves.** Updaters before this release read the main branch; this release is
+  published there too, so the next update brings the new updater, which follows the release track from then on.
+  Nothing to do by hand. The release branch becomes the default branch people clone.
+- **Codex setup's own test waits longer** on a slow first start (3 minutes instead of 1), so a cold machine no
+  longer reports a false failure.
+- **Memory writes per assistant app.** `memoryWriteBlockedApps` in brain.json (for example `["codex", "agy"]`) lets
+  those assistants recall but not write, update or delete memories; `memoryWriteBlockedTo` names who saves the fact
+  instead. The app is found from `HAVOK_APP` or the assistant program running the command. Off unless set.
+- **The mod for Claude Code, 0.1.89.** Agent addresses name the app (name@MACHINE@app); a session held at its usage
+  limit resumes by itself when the limit resets; only a command's own terminal window is refused, so agent tabs,
+  files, browsers and apps open; the status line counts down to a cold cache.
+
 ## 0.4.115
 
 - **The 0.4.108 front page is back.** 0.4.114 was published with the older README of 0.4.107 by mistake, without

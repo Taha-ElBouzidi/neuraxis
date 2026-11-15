@@ -75,7 +75,41 @@ function nameOf(pid, session) {
         return '';
     }
 }
-export function whoAmI() {
+const APP_PROCS = [[/^claude(\.exe)?$/i, 'claude'], [/^codex(\.exe)?$/i, 'codex'], [/^(agy|antigravity)(\.exe)?$/i, 'agy'],
+    [/^gemini(\.exe)?$/i, 'gemini'], [/^cursor(\.exe)?$/i, 'cursor']];
+export function appFromChain(procs, pid) {
+    const by = new Map(procs.map((p) => [Number(p.pid), p]));
+    const seen = new Set();
+    for (let cur = by.get(Number(pid)); cur && !seen.has(cur.pid); cur = by.get(Number(cur.ppid))) {
+        seen.add(cur.pid);
+        for (const [re, app] of APP_PROCS)
+            if (re.test(String(cur.name || '')))
+                return app;
+    }
+    return '';
+}
+export function appOf() {
+    const env = String(process.env.HAVOK_APP || '').trim().toLowerCase();
+    if (/^[a-z]{2,16}$/.test(env))
+        return env;
+    try {
+        let procs = [];
+        if (process.platform === 'win32') {
+            const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+                'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.Name)" }'], { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+            procs = out.split(/\r?\n/).map((l) => l.trim().match(/^(\d+) (\d+) (.+)$/)).filter(Boolean).map((m) => ({ pid: +m[1], ppid: +m[2], name: m[3] }));
+        }
+        else {
+            const out = execFileSync('ps', ['-eo', 'pid=,ppid=,comm='], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+            procs = out.split(/\n/).map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean).map((m) => ({ pid: +m[1], ppid: +m[2], name: m[3].split('/').pop() }));
+        }
+        return appFromChain(procs, process.pid);
+    }
+    catch {
+        return '';
+    }
+}
+export function whoAmI({ app = false } = {}) {
     const session = process.env.CLAUDE_CODE_SESSION_ID || '';
     return {
         machine: hostname(),
@@ -84,6 +118,7 @@ export function whoAmI() {
         model: modelOf(session),
         effort: process.env.CLAUDE_EFFORT || '',
         agent: session ? 'claude-code' : (process.env.HAVOK_AGENT || 'unknown'),
+        ...(app ? { app: appOf() } : {}),
     };
 }
 export function record(entries, by, via) {

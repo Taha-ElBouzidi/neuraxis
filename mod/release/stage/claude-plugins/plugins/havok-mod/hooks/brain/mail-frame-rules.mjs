@@ -61,7 +61,12 @@ export const noClaims = (t, ownerNames = []) => {
 };
 const FROM_RE = /^[a-z0-9._-]+@[A-Za-z0-9._-]+$/;
 const ID_RE = /^[A-Za-z0-9]+$/;
-export const headerFrom = (from) => (FROM_RE.test(String(from ?? '')) ? String(from) : 'invalid-sender');
+const APP_PART_RE = /^@[a-z][a-z0-9-]{0,15}$/;
+export const fullFrom = (from, full) => {
+    const f = String(from ?? ''), g = String(full ?? '');
+    return FROM_RE.test(f) && g.startsWith(f) && APP_PART_RE.test(g.slice(f.length)) ? g : f;
+};
+export const headerFrom = (from, full) => (FROM_RE.test(String(from ?? '')) ? fullFrom(from, full) : 'invalid-sender');
 export const headerId = (id) => (ID_RE.test(String(id ?? '')) ? String(id) : 'invalid');
 export const headerTime = (iso) => { const t = utc(String(iso ?? '')); return /^\d{4}-\d\d-\d\d \d\d:\d\d UTC$/.test(t) ? t : 'unknown time'; };
 export function frame(msgs, boundary, ownerNames = []) {
@@ -70,7 +75,7 @@ export function frame(msgs, boundary, ownerNames = []) {
         let b = boundary();
         for (let i = 0; i < 20 && body.includes(b); i++)
             b = boundary();
-        return `${MAIL_WORD}${headerFrom(m.from)}, ${headerTime(m.sent_at)} (id ${headerId(m.id)})\n<<<msg-${b}\n${body}\nmsg-${b}>>>`;
+        return `${MAIL_WORD}${headerFrom(m.from, m.from_full)}, ${headerTime(m.sent_at)} (id ${headerId(m.id)})\n<<<msg-${b}\n${body}\nmsg-${b}>>>`;
     };
     return msgs.map(one).join('\n\n');
 }

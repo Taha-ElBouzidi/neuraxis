@@ -281,3 +281,34 @@ test('the small parts: release notes, verify failures, dependency changes', () =
     assert.equal(dependenciesChanged('{"dependencies":{"a":"1"}}', '{"dependencies":{"a":"1"},"version":"2"}'), false);
     assert.equal(dependenciesChanged('{"dependencies":{"a":"1"}}', '{"dependencies":{"a":"2"}}'), true);
 });
+test('tracks: the default release track takes only what was promoted; latest takes every release; main is the fallback', () => {
+    const { up, install } = setup();
+    release(up, '0.2.0');
+    git(up, 'branch', 'release');
+    const newest = release(up, '0.3.0');
+    git(up, 'branch', 'latest');
+    const r1 = runUpdate({ brain: install, url: up, env: env() });
+    assert.equal(r1.to, '0.2.0', JSON.stringify(r1));
+    writeFileSync(join(install, 'brain.json'), JSON.stringify({ updateTrack: 'latest' }));
+    const r2 = runUpdate({ brain: install, url: up, env: env() });
+    assert.equal(r2.to, '0.3.0', JSON.stringify(r2));
+    assert.equal(git(install, 'rev-parse', 'HEAD'), newest);
+});
+test('tracks: an install on release moves when release is promoted, and the environment variable chooses the track', () => {
+    const { up, install } = setup();
+    release(up, '0.2.0');
+    git(up, 'branch', 'release');
+    git(up, 'branch', 'latest');
+    const second = release(up, '0.3.0');
+    git(up, 'branch', '-f', 'latest', 'HEAD');
+    assert.equal(runUpdate({ brain: install, url: up, env: env() }).to, '0.2.0');
+    assert.equal(runUpdate({ brain: install, url: up, env: env() }).status, 'current');
+    git(up, 'branch', '-f', 'release', second);
+    assert.equal(runUpdate({ brain: install, url: up, env: env() }).to, '0.3.0');
+    const { up: up2, install: i2 } = setup();
+    release(up2, '0.2.0');
+    git(up2, 'branch', 'release');
+    release(up2, '0.3.0');
+    git(up2, 'branch', 'latest');
+    assert.equal(runUpdate({ brain: i2, url: up2, env: { ...env(), NEURAXIS_UPDATE_TRACK: 'latest' } }).to, '0.3.0');
+});

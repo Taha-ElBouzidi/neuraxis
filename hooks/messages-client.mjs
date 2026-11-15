@@ -9,6 +9,9 @@ const ADDRESS_RE = /^[a-z0-9][a-z0-9._-]{0,47}@[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const CALL_MS = 6000;
 export const machineName = () => String(process.env.COMPUTERNAME || hostname() || '').toUpperCase();
 const home = () => process.env.USERPROFILE || process.env.HOME || homedir();
+const APPS = new Set(['claude', 'agy', 'gemini', 'codex', 'cursor']);
+let APP = '';
+export function setApp(kind) { const k = String(kind || '').toLowerCase(); APP = APPS.has(k) ? k : ''; return APP; }
 export function identity({ kind = 'agent', cwd = process.cwd() } = {}) {
     const env = String(process.env.HAVOK_MOD_AGENT || '').trim().toLowerCase();
     if (AGENT_RE.test(env))
@@ -61,7 +64,7 @@ async function call(svc, agent, method, path, body, fetchImpl = fetch, ms = CALL
     try {
         const r = await fetchImpl(svc.url + path, {
             method, signal: AbortSignal.timeout(ms),
-            headers: { authorization: 'Bearer ' + svc.token, 'x-agent': agent, 'content-type': 'application/json' },
+            headers: { authorization: 'Bearer ' + svc.token, 'x-agent': agent, 'content-type': 'application/json', ...(APP ? { 'x-agent-app': APP } : {}) },
             ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
         let json = {};
@@ -120,7 +123,7 @@ export async function send(agent, { to = '', text = '', reply_to = '' } = {}, { 
         return { queued: true, why: 'the messages service does not answer right now; kept in the outbox and sent in order when it answers' };
     if (!mine.ok)
         return { error: 'the messages service refused it: ' + String(mine.body?.error || mine.status) };
-    return { sent: true, id: mine.body?.id, to: mine.body?.to || mine.body?.recipient?.address || to };
+    return { sent: true, id: mine.body?.id, to: mine.body?.to_full || mine.body?.to || mine.body?.recipient?.address || to };
 }
 export async function receive(agent, { session = '', h = home(), svc = service(h), fetchImpl = fetch, boundary = () => randomUUID().replace(/-/g, '').slice(0, 8) } = {}) {
     if (!svc)
@@ -151,6 +154,8 @@ export async function agents(agent, { h = home(), svc = service(h), fetchImpl = 
     return r.ok ? r.body : { error: r.net ? 'the messages service does not answer' : String(r.body?.error || r.status) };
 }
 export async function turnBlock({ kind, session = '', cwd = process.cwd() } = {}, o = {}) {
+    if (!APP)
+        setApp(kind);
     const agent = identity({ kind, cwd });
     const r = await receive(agent, { session, ...o });
     if (!r.count)
